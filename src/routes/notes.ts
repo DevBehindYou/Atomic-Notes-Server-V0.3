@@ -12,7 +12,7 @@ import { getDb } from '../db/mongo.js';
 import { collections, type NoteDoc } from '../db/collections.js';
 import { requireAuth } from '../middleware/auth.js';
 import { decryptToken, encryptToken } from '../lib/crypto.js';
-import { createNoteFile, updateNoteFile, deleteNoteFile, getNoteFileContent, ensureAppFolders, isDriveNotFound } from '../lib/googleDrive.js';
+import { createNoteFile, updateNoteFile, deleteNoteFile, getNoteFileContent, ensureAppFolders, isDriveNotFound, withDriveRetry } from '../lib/googleDrive.js';
 import { isInvalidGrant, refreshAccessToken } from '../lib/googleOAuth.js';
 import { migrateAtomicFile, CorruptAtomicFileError } from '../types/atomicFile.js';
 import { httpError } from '../lib/httpError.js';
@@ -28,16 +28,23 @@ export type DriveAdapter = {
 
 /** Notes per push request. Matches the most notes an account can hold, so one upload of everything is one request. */
 export const MAX_PUSH_ROWS = NOTE_LIMIT.ceiling;
-/** Drive writes in flight at once within one push. Each write is ~1.7 s of waiting, so they overlap well. */
-const DRIVE_CONCURRENCY = 4;
+/**
+ * Drive calls in flight at once within one request. Each write is ~1.5 s of waiting on Google, so they overlap
+ * well: 21 notes take 3 rounds instead of 6. Google's per-user quota is far above this; a rate-limit answer is
+ * retried with backoff (withDriveRetry).
+ */
+const DRIVE_CONCURRENCY = 8;
+/** Rows per pull page. All of a page's Drive reads run at once, so a page costs one Drive round trip. */
+const PULL_PAGE = 10;
 
 export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateNoteFile, deleteNoteFile, getNoteFileContent }) {
   // Every Drive call is timed so a slow request shows how much of it was Google (see Server-Timing).
-  const createNoteFile = (...args: Parameters<DriveAdapter['createNoteFile']>) => timedDrive(() => drive.createNoteFile(...args));
-  const updateNoteFile = (...args: Parameters<DriveAdapter['updateNoteFile']>) => timedDrive(() => drive.updateNoteFile(...args));
-  const deleteNoteFile = (...args: Parameters<DriveAdapter['deleteNoteFile']>) => timedDrive(() => drive.deleteNoteFile(...args));
-  const getNoteFileContent = (...args: Parameters<DriveAdapter['getNoteFileContent']>) => timedDrive(() => drive.getNoteFileContent(...args));
-  const ensureFolders = (...args: Parameters<typeof ensureAppFolders>) => timedDrive(() => (drive.ensureAppFolders ?? ensureAppFolders)(...args));
+  // Rate limits and passing Google errors are retried with backoff inside the timing.
+  const createNoteFile = (...args: Parameters<DriveAdapter['createNoteFile']>) => timedDrive(() => withDriveRetry(() => drive.createNoteFile(...args)));
+  const updateNoteFile = (...args: Parameters<DriveAdapter['updateNoteFile']>) => timedDrive(() => withDriveRetry(() => drive.updateNoteFile(...args)));
+  const deleteNoteFile = (...args: Parameters<DriveAdapter['deleteNoteFile']>) => timedDrive(() => withDriveRetry(() => drive.deleteNoteFile(...args)));
+  const getNoteFileContent = (...args: Parameters<DriveAdapter['getNoteFileContent']>) => timedDrive(() => withDriveRetry(() => drive.getNoteFileContent(...args)));
+  const ensureFolders = (...args: Parameters<typeof ensureAppFolders>) => timedDrive(() => withDriveRetry(() => (drive.ensureAppFolders ?? ensureAppFolders)(...args)));
   const notesRoute = new Hono();
   // Notes are written through /push only, where sync is charged and rate limited. The single-note REST writes
   // would be a way around both, so they are closed.
@@ -377,8 +384,8 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
     if (after === null && since) filter.updatedAt = { $gte: new Date(since) };
     if (encOnly) filter.encV = 0;
 
-    const metaRows = await collections.notes(db).find(filter).sort({ syncSequence: 1, _id: 1 }).limit(11).toArray();
-    const hasMore = metaRows.length > 10;
+    const metaRows = await collections.notes(db).find(filter).sort({ syncSequence: 1, _id: 1 }).limit(PULL_PAGE + 1).toArray();
+    const hasMore = metaRows.length > PULL_PAGE;
     if (hasMore) metaRows.pop();
     const nextCursor = hasMore ? metaRows[metaRows.length - 1].syncSequence ?? 0 : upper;
     if (metaRows.length === 0) return c.json({ rows: [], cursor, nextCursor, hasMore: false });
@@ -388,7 +395,7 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
     // Bound Drive requests while retaining row order. This does not replace
     // pagination or a durable sync cursor for large accounts.
     const unreadable: string[] = [];
-    const rows = (await mapConcurrent(metaRows, 4, async (m) => {
+    const rows = (await mapConcurrent(metaRows, PULL_PAGE, async (m) => {
         try {
           // A deleted note's file is only in the Drive trash, where it stays readable. Sending its content
           // lets every device keep it in a Recycle Bin and restore the real note, not an empty one.
@@ -424,7 +431,7 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
 
     if (all.length > 0) {
       const { accessToken, refreshToken } = await getLiveGoogleTokens(db, userId);
-      await mapConcurrent(all, 4, async (n) => {
+      await mapConcurrent(all, DRIVE_CONCURRENCY, async (n) => {
         try {
           await deleteNoteFile(accessToken, refreshToken, n.driveFileId);
         } catch (error) {

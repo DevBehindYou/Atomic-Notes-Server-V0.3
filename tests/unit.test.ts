@@ -13,7 +13,7 @@ import { encryptToken, decryptToken } from '../src/lib/crypto';
 import { remoteNoteRowSchema } from '../src/types/noteWire';
 import { createNoteFileWith } from '../src/lib/googleDrive';
 import { assertProductionEnvironment, getEnvIssues } from '../src/lib/env';
-import { isDriveNotFound } from '../src/lib/googleDrive';
+import { isDriveNotFound, isDriveRetryable, withDriveRetry } from '../src/lib/googleDrive';
 import { isInvalidGrant } from '../src/lib/googleOAuth';
 import { httpError } from '../src/lib/httpError';
 
@@ -216,4 +216,36 @@ test('relative imports name .js files so the compiled output runs under plain No
   };
   walk('src'); walk('api');
   assert.deepEqual(offenders, []);
+});
+
+test('Drive rate limits and 5xx are retryable; not-found, auth and bad requests are not', () => {
+  const rateLimited = (reason: string) => ({ response: { status: 403, data: { error: { errors: [{ reason }] } } } });
+  assert.equal(isDriveRetryable({ response: { status: 429 } }), true);
+  assert.equal(isDriveRetryable({ status: 503 }), true);
+  assert.equal(isDriveRetryable({ code: 500 }), true);
+  assert.equal(isDriveRetryable(rateLimited('userRateLimitExceeded')), true);
+  assert.equal(isDriveRetryable({ status: 403, errors: [{ reason: 'rateLimitExceeded' }] }), true);
+  assert.equal(isDriveRetryable(rateLimited('insufficientFilePermissions')), false);
+  for (const status of [400, 401, 404]) assert.equal(isDriveRetryable({ response: { status } }), false);
+  assert.equal(isDriveRetryable(new Error('simulated_drive_failure')), false);
+  assert.equal(isDriveRetryable(null), false);
+});
+
+test('withDriveRetry backs off on rate limits, then gives up; final errors are not retried', async () => {
+  const waits: number[] = [];
+  const sleep = async (ms: number) => { waits.push(ms); };
+  let calls = 0;
+  const flaky = async () => { if (++calls < 3) throw { response: { status: 429 } }; return 'written'; };
+  assert.equal(await withDriveRetry(flaky, { sleep, baseMs: 100 }), 'written');
+  assert.equal(calls, 3);
+  assert.equal(waits.length, 2);
+  assert.ok(waits[0] >= 100 && waits[0] < 200 && waits[1] >= 200 && waits[1] < 300);
+
+  calls = 0;
+  await assert.rejects(withDriveRetry(async () => { calls++; throw { status: 503 }; }, { sleep, attempts: 3 }));
+  assert.equal(calls, 3);
+
+  calls = 0;
+  await assert.rejects(withDriveRetry(async () => { calls++; throw Object.assign(new Error('gone'), { code: 404 }); }, { sleep }), /gone/);
+  assert.equal(calls, 1);
 });

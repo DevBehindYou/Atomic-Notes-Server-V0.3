@@ -149,7 +149,8 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal((await push(Array.from({ length: 7 }, () => row()))).status, 200);
     const response = await request('/notes/pull', 'GET', undefined, owner.token);
     assert.equal(response.status, 200); assert.ok(((await response.json()) as { cursor: string }).cursor);
-    assert.ok(peakReads <= 4); assert.ok(peakReads > 1);
+    // A page's reads run together (one Drive round trip per page), never more than a page.
+    assert.ok(peakReads <= 10); assert.ok(peakReads > 4, `peak reads in flight: ${peakReads}`);
     const count = await collections.notes(db).countDocuments({ userId: owner.id });
     failDelete = true;
     assert.equal((await request('/notes', 'DELETE', undefined, owner.token)).status, 500);
@@ -569,7 +570,8 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     const body = await json(response);
     assert.deepEqual(body.results.map((r: any) => r.id), notes.map((n) => n.id));
     assert.deepEqual(body.results.map((r: any) => r.seq), Array.from({ length: 12 }, (_, i) => i + 1));
-    assert.ok(peakWrites > 1 && peakWrites <= 4, `peak writes in flight: ${peakWrites}`);
+    // Bounded at 8 in flight: 12 notes take two rounds.
+    assert.ok(peakWrites > 4 && peakWrites <= 8, `peak writes in flight: ${peakWrites}`);
   });
 
   await t.test('one push carries up to 100 notes', async () => {

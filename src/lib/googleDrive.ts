@@ -120,3 +120,39 @@ export function isDriveNotFound(error: unknown): boolean {
   const e = error as { code?: number | string; status?: number | string; response?: { status?: number | string } } | null;
   return [e?.code, e?.status, e?.response?.status].some((value) => value === 404 || value === '404');
 }
+
+/**
+ * True for Google's "slow down" answers (429, and 403 with a rate-limit reason) and for passing 5xx errors.
+ * Google asks clients to retry these with exponential backoff; everything else (404, 401, 400) is final.
+ */
+export function isDriveRetryable(error: unknown): boolean {
+  type Reason = { reason?: string };
+  const e = error as {
+    code?: number | string; status?: number | string; errors?: Reason[];
+    response?: { status?: number | string; data?: { error?: { errors?: Reason[] } } };
+  } | null;
+  const status = Number(e?.response?.status ?? e?.status ?? e?.code);
+  if (status === 429 || (status >= 500 && status < 600)) return true;
+  if (status !== 403) return false;
+  const reasons = [...(e?.errors ?? []), ...(e?.response?.data?.error?.errors ?? [])].map((r) => r?.reason);
+  return reasons.some((r) => r === 'userRateLimitExceeded' || r === 'rateLimitExceeded');
+}
+
+/**
+ * Runs one Drive call, retrying [isDriveRetryable] failures after 0.5 s, 1 s, then 2 s (plus up to 0.5 s of
+ * jitter, so parallel writes do not retry in step). Every call made through it is safe to repeat: updates and
+ * reads are idempotent, and a create looks for an existing file with that name first.
+ */
+export async function withDriveRetry<T>(
+  call: () => Promise<T>,
+  { attempts = 4, baseMs = 500, sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)) } = {},
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await call();
+    } catch (error) {
+      if (attempt >= attempts || !isDriveRetryable(error)) throw error;
+      await sleep(baseMs * 2 ** (attempt - 1) + Math.random() * baseMs);
+    }
+  }
+}
