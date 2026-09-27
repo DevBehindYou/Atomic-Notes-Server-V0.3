@@ -82,12 +82,17 @@ admin.get('/user', async (c) => {
 // now living where the rest of the wallet-mutation logic already lives
 // (lib/energy.ts's transactional pattern) instead of a second copy of it.
 // ---------------------------------------------------------------------------
+/** Largest single adjustment: well past any real grant, far below anything that loses integer precision. */
+const MAX_ADJUST = 100_000;
+// Coins and energy are whole numbers everywhere else (spend, convert, tiers); a fractional delta would leave a
+// wallet holding part of a coin.
+const adjustDelta = z.number().int().min(-MAX_ADJUST).max(MAX_ADJUST).default(0);
 const adjustSchema = z
   .object({
     email: z.string().email().optional(),
     user_id: z.string().uuid().optional(),
-    coins_delta: z.number().finite().default(0),
-    energy_delta: z.number().finite().default(0),
+    coins_delta: adjustDelta,
+    energy_delta: adjustDelta,
     note: z.string().optional(),
   })
   .refine((b) => b.email || b.user_id, { message: 'email or user_id is required' })
