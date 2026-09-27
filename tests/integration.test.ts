@@ -200,6 +200,15 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     }
     const lookup = await request('/admin/user?email=A%2BB%40EXAMPLE.COM', 'GET', undefined, undefined, 'test-admin-key');
     assert.equal(lookup.status, 200); assert.equal(((await lookup.json()) as { user_id: string }).user_id, account.id);
+    // Adjustments are whole numbers within bounds, and a refused one changes nothing.
+    const coinsBefore = (await collections.atomicUsers(db).findOne({ _id: account.id }))!.coins;
+    for (const bad of [{ coins_delta: 0.5 }, { energy_delta: -1.25 }, { coins_delta: 1e9 }]) {
+      const refused = await request('/admin/energy', 'POST', { user_id: account.id, ...bad }, undefined, 'test-admin-key');
+      assert.equal(refused.status, 400, JSON.stringify(bad));
+    }
+    assert.equal((await collections.atomicUsers(db).findOne({ _id: account.id }))!.coins, coinsBefore);
+    const granted = await request('/admin/energy', 'POST', { user_id: account.id, coins_delta: 2 }, undefined, 'test-admin-key');
+    assert.equal(granted.status, 200); assert.equal(((await granted.json()) as { coins: number }).coins, coinsBefore + 2);
     const vaultBody = { verifier: 'test-verifier', kdfMemory: 65536, kdfIterations: 3, kdfParallelism: 1 };
     assert.equal((await request('/vault', 'POST', vaultBody, account.token)).status, 201);
     assert.equal((await request('/vault', 'POST', vaultBody, account.token)).status, 409);
