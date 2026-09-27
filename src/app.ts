@@ -9,6 +9,7 @@ import energyRoute from './routes/energy.js';
 import atomicuserRoute from './routes/atomicuser.js';
 import adminRoute from './routes/admin.js';
 import publicRoute from './routes/public.js';
+import notificationsRoute from './routes/notifications.js';
 import { registerErrorHandler } from './middleware/errorHandler.js';
 
 const app = new Hono().basePath('/api');
@@ -32,5 +33,6 @@ app.route('/energy', energyRoute);
 app.route('/atomicuser', atomicuserRoute);
 app.route('/admin', adminRoute);
 app.route('/public', publicRoute);
+app.route('/notifications', notificationsRoute);
 
 export default app;
