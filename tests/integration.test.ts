@@ -28,6 +28,7 @@ const { createNotesRoute } = await import('../src/routes/notes');
 const { registerErrorHandler } = await import('../src/middleware/errorHandler');
 const { default: admin } = await import('../src/routes/admin');
 const { default: publicRoute } = await import('../src/routes/public');
+const { default: notificationsRoute } = await import('../src/routes/notifications');
 const { default: vault } = await import('../src/routes/vault');
 const { default: energyRoute } = await import('../src/routes/energy');
 const { default: profileRoute } = await import('../src/routes/atomicuser');
@@ -87,7 +88,7 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
   };
   const app = new Hono(); registerErrorHandler(app);
   app.route('/api/notes', createNotesRoute(drive));
-  app.route('/api/admin', admin); app.route('/api/public', publicRoute);
+  app.route('/api/admin', admin); app.route('/api/public', publicRoute); app.route('/api/notifications', notificationsRoute);
   app.route('/api/energy', energyRoute); app.route('/api/atomicuser', profileRoute);
   app.route('/api/vault', vault); app.route('/api/auth', auth);
   const request = (path: string, method = 'GET', body?: object, token?: string, adminKey?: string) => app.request(`/api${path}`, {
@@ -176,7 +177,7 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal((await request('/admin/notifications')).status, 401);
     const adminRequest = (method: string, body?: object, query = '') => request(`/admin/notifications${query}`, method, body, undefined, 'test-admin-key');
     const publicId = randomUUID();
-    for (const fields of [ { id: publicId }, { target_user_id: owner.id }, { target_audience: 'user' }, { expires_at: '2020-01-01T00:00:00Z' } ]) {
+    for (const fields of [ { id: publicId }, { target_user_id: owner.id }, { target_audience: 'active' }, { expires_at: '2020-01-01T00:00:00Z' } ]) {
       assert.equal((await adminRequest('POST', { type: 'info', subject: 'test', description: 'message', ...fields })).status, 200);
     }
     const visible = await (await request('/public/notifications/active')).json() as { rows: { id: string }[] };
@@ -209,6 +210,9 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal((await collections.atomicUsers(db).findOne({ _id: account.id }))!.coins, coinsBefore);
     const granted = await request('/admin/energy', 'POST', { user_id: account.id, coins_delta: 2 }, undefined, 'test-admin-key');
     assert.equal(granted.status, 200); assert.equal(((await granted.json()) as { coins: number }).coins, coinsBefore + 2);
+    // The App shows the note in the user's Activity: the default is written for them, not for the operator.
+    const [lastEntry] = await collections.energyLedger(db).find({ userId: account.id }).sort({ createdAt: -1 }).limit(1).toArray();
+    assert.equal(lastEntry.note, 'Balance adjusted by Atomic Notes');
     const vaultBody = { verifier: 'test-verifier', kdfMemory: 65536, kdfIterations: 3, kdfParallelism: 1 };
     assert.equal((await request('/vault', 'POST', vaultBody, account.token)).status, 201);
     assert.equal((await request('/vault', 'POST', vaultBody, account.token)).status, 409);
@@ -743,5 +747,109 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.ok(await states.findOne({ _id: hash(state) }), 'a rejected callback must not consume the state');
     await states.updateOne({ _id: hash(state) }, { $set: { expiresAt: new Date(Date.now() - 1000) } });
     assert.equal((await callback(`code=x&state=${state}`, `atomic_oauth_state=${binding}`)).status, 400);
+  });
+
+  await t.test('the App feed delivers what the Controller published, with per-user read and dismiss state', async () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const publish = async (fields: object) => {
+      const response = await request('/admin/notifications', 'POST', { type: 'general', subject: 'feed test', description: 'hello', ...fields }, undefined, 'test-admin-key');
+      assert.equal(response.status, 200, JSON.stringify(fields));
+      const body = await json(response);
+      return { id: body.row.id as string, size: body.audience_size as number };
+    };
+    const reader = await user(), bystander = await user(), dormant = await user();
+    await collections.atomicUsers(db).updateOne({ _id: reader.id }, { $set: { lastDailyGrantAt: new Date() } });
+    await collections.atomicUsers(db).updateOne({ _id: dormant.id }, { $set: { lastDailyGrantAt: new Date(Date.now() - 10 * DAY) } });
+    await collections.sessions(db).updateMany({ userId: dormant.id }, { $set: { createdAt: new Date(Date.now() - 10 * DAY) } });
+
+    const everyone = await publish({});
+    const toReader = await publish({ target_user_id: reader.id });
+    const toBystander = await publish({ target_user_id: bystander.id });
+    const active = await publish({ target_audience: 'active' });
+    const inactive = await publish({ target_audience: 'inactive' });
+    const pinned = await publish({ priority: 'critical', dismissible: false });
+    const expired = await publish({ expires_at: new Date(Date.now() - 1000).toISOString() });
+    const resolved = await publish({ status: 'resolved' });
+    const newAppsOnly = await publish({ min_app_version: '2.0.0' });
+    const oldAppsOnly = await publish({ max_app_version: '1.9.9' });
+    assert.equal(toReader.size, 1);
+    assert.ok(everyone.size >= 3);
+    assert.equal((await request('/admin/notifications', 'POST', { type: 'general', subject: 's', description: 'd', target_audience: 'user' }, undefined, 'test-admin-key')).status, 400);
+
+    const feed = async (account: { token: string }, version?: string) => {
+      const response = await request(`/notifications${version ? `?app_version=${version}` : ''}`, 'GET', undefined, account.token);
+      assert.equal(response.status, 200);
+      return (await json(response)).rows as { id: string; is_read: boolean; dismissible: boolean; created_at: string }[];
+    };
+    const ids = async (account: { token: string }, version?: string) => new Set((await feed(account, version)).map((n) => n.id));
+    const readerSees = await ids(reader, '1.18.2');
+    for (const n of [everyone, toReader, active, pinned]) assert.ok(readerSees.has(n.id));
+    for (const n of [toBystander, inactive, expired, resolved, newAppsOnly, oldAppsOnly]) assert.ok(!readerSees.has(n.id));
+    const dormantSees = await ids(dormant, '1.18.2');
+    for (const n of [everyone, inactive, pinned]) assert.ok(dormantSees.has(n.id));
+    for (const n of [active, toReader]) assert.ok(!dormantSees.has(n.id));
+    // An App that does not send its version sees every range.
+    const anyVersion = await ids(reader);
+    assert.ok(anyVersion.has(newAppsOnly.id) && anyVersion.has(oldAppsOnly.id));
+    const ordered = (await feed(reader)).map((n) => n.created_at);
+    assert.deepEqual(ordered, [...ordered].sort().reverse(), 'newest first');
+
+    const post = (path: string, account = reader) => request(`/notifications${path}`, 'POST', undefined, account.token);
+    assert.equal((await feed(reader)).find((n) => n.id === everyone.id)!.is_read, false);
+    assert.equal((await post(`/${everyone.id}/read`)).status, 200);
+    assert.equal((await post(`/${everyone.id}/read`)).status, 200, 'repeatable');
+    assert.equal((await feed(reader)).find((n) => n.id === everyone.id)!.is_read, true);
+    assert.equal((await feed(bystander)).find((n) => n.id === everyone.id)!.is_read, false, 'read state is per user');
+    assert.equal((await post(`/${toBystander.id}/read`)).status, 404, "another user's message");
+    assert.equal((await post('/not-a-uuid/read')).status, 400);
+    assert.equal((await post(`/${pinned.id}/dismiss`)).status, 409);
+    assert.equal((await post(`/${toReader.id}/dismiss`)).status, 200);
+    assert.ok(!(await ids(reader)).has(toReader.id), 'dismissed');
+    const all = await json(await post('/read-all'));
+    assert.ok(all.marked >= 2);
+    assert.ok((await feed(reader)).every((n) => n.is_read));
+    assert.equal((await request('/notifications')).status, 401);
+
+    const listed = (await json(await request('/admin/notifications', 'GET', undefined, undefined, 'test-admin-key'))).rows as { id: string; reads: number; recipients: number | null }[];
+    assert.ok(listed.find((n) => n.id === everyone.id)!.reads >= 1);
+    assert.equal(listed.find((n) => n.id === active.id)!.recipients, active.size);
+    assert.equal(listed.find((n) => n.id === everyone.id)!.recipients, null);
+    assert.equal((await request(`/admin/notifications?id=${active.id}`, 'DELETE', undefined, undefined, 'test-admin-key')).status, 200);
+    assert.equal(await collections.notificationRecipients(db).countDocuments({ notificationId: active.id }), 0);
+    assert.equal(await collections.notificationStates(db).countDocuments({ notificationId: active.id }), 0);
+  });
+
+  await t.test('Controller sign-in is throttled per client and "log out everywhere" only moves forward', async () => {
+    const attempt = async (client: string, result: string) => json(await request('/admin/controller/login-attempts', 'POST', { client, result }, undefined, 'test-admin-key'));
+    const ip = '203.0.113.9';
+    assert.deepEqual(await attempt(ip, 'check'), { allowed: true, retry_after_seconds: 0 });
+    for (let i = 1; i < 5; i++) assert.equal((await attempt(ip, 'failure')).allowed, true, `failure ${i}`);
+    const locked = await attempt(ip, 'failure');
+    assert.equal(locked.allowed, false);
+    assert.ok(locked.retry_after_seconds > 800 && locked.retry_after_seconds <= 900);
+    assert.equal((await attempt(ip, 'check')).allowed, false);
+    assert.equal((await attempt('198.51.100.7', 'check')).allowed, true, 'another client is not locked');
+    assert.equal(await collections.controllerLoginAttempts(db).countDocuments({ _id: ip }), 0, 'the address is stored hashed');
+    // Once the lock and the window have passed, the count starts again.
+    await collections.controllerLoginAttempts(db).updateMany({}, { $set: { windowStart: new Date(Date.now() - 16 * 60 * 1000), lockedUntil: new Date(Date.now() - 1000) } });
+    assert.equal((await attempt(ip, 'check')).allowed, true);
+    assert.equal((await attempt(ip, 'failure')).allowed, true);
+    assert.equal((await collections.controllerLoginAttempts(db).findOne({}))!.failures, 1);
+    await attempt(ip, 'success');
+    assert.equal(await collections.controllerLoginAttempts(db).countDocuments({}), 0);
+    // Guesses sent at the same time all count.
+    await Promise.all(Array.from({ length: 5 }, () => attempt('burst-client', 'failure')));
+    assert.equal((await attempt('burst-client', 'check')).allowed, false);
+    assert.equal((await request('/admin/controller/login-attempts', 'POST', { client: ip, result: 'check' })).status, 401);
+
+    const epoch = async (revokedBefore?: number) => request('/admin/controller/session-epoch', revokedBefore === undefined ? 'GET' : 'POST',
+      revokedBefore === undefined ? undefined : { revoked_before: revokedBefore }, undefined, 'test-admin-key');
+    assert.deepEqual(await json(await epoch()), { revoked_before: null });
+    const first = Date.now();
+    assert.equal((await json(await epoch(first))).revoked_before, first);
+    assert.equal((await json(await epoch(first - 60000))).revoked_before, first, 'never moves back');
+    assert.equal((await epoch(Date.now() + 60 * 60 * 1000)).status, 400);
+    assert.equal((await json(await epoch())).revoked_before, first);
+    assert.equal((await request('/admin/controller/session-epoch')).status, 401);
   });
 });

@@ -224,11 +224,11 @@ export type LogDoc = z.infer<typeof logSchema>;
 
 // ---------------------------------------------------------------------------
 // notifications — mirrors the real `notifications` table (migrations 008 +
-// 012). Global rows the Controller admin panel manages; the app/public site
-// only ever reads them, scoped by targetAudience/targetUserId/version range.
-// A second `user_notifications` table exists in the real schema for per-user
-// read/dismiss state — not built here, notifications-as-a-feature stayed out
-// of scope for this migration pass (see the server README).
+// 012). Global rows the Controller admin panel manages; the App and the public
+// site only ever read them, scoped by targetAudience/targetUserId/version range.
+// Per-user read/dismiss state lives in `notification_states`; who an Active or
+// Inactive notification reached is fixed at publish time in
+// `notification_recipients` (see lib/notificationFeed.ts).
 // ---------------------------------------------------------------------------
 export const notificationSchema = z.object({
   _id: z.string().uuid(),
@@ -250,6 +250,30 @@ export const notificationSchema = z.object({
 });
 export type NotificationDoc = z.infer<typeof notificationSchema>;
 
+/** One user's read/dismiss state for one notification. `_id` is `${userId}:${notificationId}`. */
+export type NotificationStateDoc = {
+  _id: string;
+  userId: string;
+  notificationId: string;
+  readAt: Date | null;
+  dismissedAt: Date | null;
+};
+
+/** A user an Active/Inactive notification was published to. `_id` is `${notificationId}:${userId}`. */
+export type NotificationRecipientDoc = { _id: string; notificationId: string; userId: string };
+
+/** Controller sign-in failures per client (hashed IP), for throttling. */
+export type ControllerLoginAttemptDoc = {
+  _id: string;
+  failures: number;
+  windowStart: Date;
+  lockedUntil: Date | null;
+  expiresAt: Date;
+};
+
+/** Small named settings, such as the Controller's session revocation time. */
+export type AdminSettingDoc = { _id: string; value: number; updatedAt: Date };
+
 // ---------------------------------------------------------------------------
 // Collection getters
 // ---------------------------------------------------------------------------
@@ -264,6 +288,10 @@ export const collections = {
   folders: (db: Db) => db.collection<FolderDoc>('folders'),
   logs: (db: Db) => db.collection<LogDoc>('logs'),
   notifications: (db: Db) => db.collection<NotificationDoc>('notifications'),
+  notificationStates: (db: Db) => db.collection<NotificationStateDoc>('notification_states'),
+  notificationRecipients: (db: Db) => db.collection<NotificationRecipientDoc>('notification_recipients'),
+  controllerLoginAttempts: (db: Db) => db.collection<ControllerLoginAttemptDoc>('controller_login_attempts'),
+  adminSettings: (db: Db) => db.collection<AdminSettingDoc>('admin_settings'),
 };
 
 /** Call once at startup (or via a one-off script) — indexes are not auto-created. */
@@ -294,4 +322,9 @@ export async function ensureIndexes(db: Db) {
   await collections.logs(db).createIndex({ createdAt: 1 }, { name: 'logs_ttl', expireAfterSeconds: 30 * 24 * 60 * 60 });
   await collections.notifications(db).createIndex({ status: 1, createdAt: -1 });
   await collections.notifications(db).createIndex({ targetUserId: 1 });
+  await collections.notificationStates(db).createIndex({ userId: 1, notificationId: 1 });
+  await collections.notificationStates(db).createIndex({ notificationId: 1 });
+  await collections.notificationRecipients(db).createIndex({ userId: 1 });
+  await collections.notificationRecipients(db).createIndex({ notificationId: 1 });
+  await collections.controllerLoginAttempts(db).createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 }

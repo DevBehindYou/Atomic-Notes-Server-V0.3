@@ -9,6 +9,8 @@ import { computeControllerStats } from '../lib/adminStats.js';
 import { logEvent } from '../lib/logs.js';
 import { getEnvIssues } from '../lib/env.js';
 import { NOTE_LIMIT } from '../lib/energy.js';
+import { AUDIENCES, audienceUserIds } from '../lib/notificationFeed.js';
+import { checkLogin, controllerSessionEpoch, recordLoginFailure, recordLoginSuccess, revokeControllerSessions } from '../lib/controllerLogin.js';
 
 const admin = new Hono();
 admin.use('*', requireAdmin);
@@ -93,7 +95,7 @@ const adjustSchema = z
     user_id: z.string().uuid().optional(),
     coins_delta: adjustDelta,
     energy_delta: adjustDelta,
-    note: z.string().optional(),
+    note: z.string().max(120).optional(),
   })
   .refine((b) => b.email || b.user_id, { message: 'email or user_id is required' })
   .refine((b) => b.coins_delta !== 0 || b.energy_delta !== 0, { message: 'nothing to adjust' });
@@ -148,7 +150,8 @@ admin.post('/energy', async (c) => {
         energyDelta: newEnergy - curEnergy,
         resultingCoins: newCoins,
         resultingEnergy: newEnergy,
-        note: body.note || 'Admin adjustment (Atomic-Controller)',
+        // The App shows this note in the user's Activity list, so the default speaks to them.
+        note: body.note?.trim() || 'Balance adjusted by Atomic Notes',
         createdAt: new Date(),
       },
       { session },
@@ -192,10 +195,26 @@ function toWire(n: NotificationDoc) {
   };
 }
 
+/** How many users each notification was published to (Active/Inactive only) and how many have read it. */
+async function deliveryCounts(db: Awaited<ReturnType<typeof getDb>>, ids: string[]) {
+  const [recipients, reads] = await Promise.all([
+    collections.notificationRecipients(db).aggregate<{ _id: string; n: number }>([
+      { $match: { notificationId: { $in: ids } } }, { $group: { _id: '$notificationId', n: { $sum: 1 } } },
+    ]).toArray(),
+    collections.notificationStates(db).aggregate<{ _id: string; n: number }>([
+      { $match: { notificationId: { $in: ids }, readAt: { $ne: null } } }, { $group: { _id: '$notificationId', n: { $sum: 1 } } },
+    ]).toArray(),
+  ]);
+  return { recipients: new Map(recipients.map((r) => [r._id, r.n])), reads: new Map(reads.map((r) => [r._id, r.n])) };
+}
+
 admin.get('/notifications', async (c) => {
   const db = await getDb();
   const rows = await collections.notifications(db).find({}).sort({ createdAt: -1 }).toArray();
-  return c.json({ rows: rows.map(toWire) });
+  const counts = await deliveryCounts(db, rows.map((n) => n._id));
+  return c.json({
+    rows: rows.map((n) => ({ ...toWire(n), recipients: counts.recipients.get(n._id) ?? null, reads: counts.reads.get(n._id) ?? 0 })),
+  });
 });
 
 const createNotificationSchema = z.object({
@@ -208,9 +227,9 @@ const createNotificationSchema = z.object({
   action: z.string().nullable().optional(),
   action_url: z.string().nullable().optional(),
   icon: z.string().nullable().optional(),
-  target_audience: z.string().optional(),
+  target_audience: z.enum(AUDIENCES).optional(),
   target_user_id: z.string().uuid().nullable().optional(),
-  target_email: z.string().email().optional(),
+  target_email: z.string().email().nullable().optional(),
   min_app_version: z.string().nullable().optional(),
   max_app_version: z.string().nullable().optional(),
   expires_at: z.string().nullable().optional(),
@@ -246,8 +265,25 @@ admin.post('/notifications', async (c) => {
     createdAt: new Date(),
     expiresAt: body.expires_at ? new Date(body.expires_at) : null,
   };
+  // Active and Inactive are decided now, while "who opened the App in the last 7 days" still means something:
+  // anyone who later reads the feed has just opened it.
+  let audienceSize: number;
+  if (targetUserId) {
+    audienceSize = 1;
+  } else if (doc.targetAudience === 'active' || doc.targetAudience === 'inactive') {
+    const userIds = await audienceUserIds(db, doc.targetAudience);
+    if (userIds.length > 0) {
+      await collections.notificationRecipients(db).insertMany(
+        userIds.map((userId) => ({ _id: `${doc._id}:${userId}`, notificationId: doc._id, userId })),
+        { ordered: false },
+      );
+    }
+    audienceSize = userIds.length;
+  } else {
+    audienceSize = await collections.users(db).countDocuments({});
+  }
   await collections.notifications(db).insertOne(doc);
-  return c.json({ row: toWire(doc) });
+  return c.json({ row: toWire(doc), audience_size: audienceSize });
 });
 
 const patchNotificationBodySchema = z.object({
@@ -260,7 +296,6 @@ const patchNotificationBodySchema = z.object({
   action: z.string().nullable().optional(),
   action_url: z.string().nullable().optional(),
   icon: z.string().nullable().optional(),
-  target_audience: z.string().nullable().optional(),
   target_user_id: z.string().uuid().nullable().optional(),
   min_app_version: z.string().nullable().optional(),
   max_app_version: z.string().nullable().optional(),
@@ -282,7 +317,6 @@ function notificationPatchFields(b: z.infer<typeof patchNotificationBodySchema>)
   if (b.action !== undefined) fields.action = b.action;
   if (b.action_url !== undefined) fields.actionUrl = b.action_url;
   if (b.icon !== undefined) fields.icon = b.icon;
-  if (b.target_audience !== undefined) fields.targetAudience = b.target_audience;
   if (b.target_user_id !== undefined) fields.targetUserId = b.target_user_id;
   if (b.min_app_version !== undefined) fields.minAppVersion = b.min_app_version;
   if (b.max_app_version !== undefined) fields.maxAppVersion = b.max_app_version;
@@ -311,7 +345,43 @@ admin.delete('/notifications', async (c) => {
   if (!id) return c.json({ error: 'id is required' }, 400);
   const db = await getDb();
   await collections.notifications(db).deleteOne({ _id: id });
+  // Its per-user state and recipient list mean nothing without it.
+  await Promise.all([
+    collections.notificationStates(db).deleteMany({ notificationId: id }),
+    collections.notificationRecipients(db).deleteMany({ notificationId: id }),
+  ]);
   return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Controller sign-in throttle and "log out everywhere". The Controller is stateless serverless functions, so
+// the state both need lives here. The client is its IP address, stored only as a hash.
+// ---------------------------------------------------------------------------
+const loginAttemptSchema = z.object({
+  client: z.string().min(1).max(200),
+  result: z.enum(['check', 'failure', 'success']),
+});
+
+admin.post('/controller/login-attempts', async (c) => {
+  const body = loginAttemptSchema.parse(await c.req.json());
+  const db = await getDb();
+  if (body.result === 'check') return c.json(await checkLogin(db, body.client));
+  if (body.result === 'failure') return c.json(await recordLoginFailure(db, body.client));
+  await recordLoginSuccess(db, body.client);
+  return c.json({ allowed: true, retry_after_seconds: 0 });
+});
+
+admin.get('/controller/session-epoch', async (c) => {
+  return c.json({ revoked_before: await controllerSessionEpoch(await getDb()) });
+});
+
+const epochSchema = z.object({ revoked_before: z.number().int().positive() });
+
+admin.post('/controller/session-epoch', async (c) => {
+  const { revoked_before: revokedBefore } = epochSchema.parse(await c.req.json());
+  // A time far in the future would end every session to come as well; the Controller only ever sends "now".
+  if (revokedBefore > Date.now() + 5 * 60 * 1000) return c.json({ error: 'revoked_before_in_future' }, 400);
+  return c.json({ revoked_before: await revokeControllerSessions(await getDb(), revokedBefore) });
 });
 
 export default admin;
