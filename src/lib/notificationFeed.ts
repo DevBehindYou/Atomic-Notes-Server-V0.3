@@ -6,7 +6,11 @@ export const ACTIVE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 /** Most notifications one feed returns, newest first. */
 export const FEED_LIMIT = 50;
 
-export const AUDIENCES = ['all', 'active', 'inactive'] as const;
+/**
+ * all: everyone, at any time. active / inactive: decided at publish time (see [audienceUserIds]).
+ * new: accounts created on or after the notification was published, for welcome messages.
+ */
+export const AUDIENCES = ['all', 'active', 'inactive', 'new'] as const;
 export type Audience = (typeof AUDIENCES)[number];
 
 /** Users who opened the App within [ACTIVE_WINDOW_MS] of [now]. */
@@ -51,7 +55,10 @@ export function versionAllows(n: Pick<NotificationDoc, 'minAppVersion' | 'maxApp
 
 /** The Mongo filter for active, unexpired notifications that reach [userId]. */
 async function reachFilter(db: Db, userId: string, now: Date) {
-  const recipientOf = await collections.notificationRecipients(db).distinct('notificationId', { userId });
+  const [recipientOf, user] = await Promise.all([
+    collections.notificationRecipients(db).distinct('notificationId', { userId }),
+    collections.users(db).findOne({ _id: userId }, { projection: { createdAt: 1 } }),
+  ]);
   return {
     status: 'active' as const,
     $and: [
@@ -62,6 +69,8 @@ async function reachFilter(db: Db, userId: string, now: Date) {
           // Everyone: no target user and no audience that was resolved at publish time.
           { targetUserId: null, targetAudience: { $in: ['all', null] } },
           { _id: { $in: recipientOf } },
+          // New accounts: published no later than this account was created.
+          ...(user ? [{ targetUserId: null, targetAudience: 'new', createdAt: { $lte: user.createdAt } }] : []),
         ],
       },
     ],

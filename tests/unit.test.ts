@@ -16,6 +16,7 @@ import { assertProductionEnvironment, getEnvIssues } from '../src/lib/env';
 import { isDriveNotFound, isDriveRetryable, withDriveRetry } from '../src/lib/googleDrive';
 import { isInvalidGrant } from '../src/lib/googleOAuth';
 import { httpError } from '../src/lib/httpError';
+import { SUPPORT_URL, WELCOME_NOTIFICATIONS } from '../src/lib/welcomeNotifications';
 
 test('current Flutter push payload omits updated_at and cannot choose its owner', () => {
   const row = remoteNoteRowSchema.parse({
@@ -248,4 +249,13 @@ test('withDriveRetry backs off on rate limits, then gives up; final errors are n
   calls = 0;
   await assert.rejects(withDriveRetry(async () => { calls++; throw Object.assign(new Error('gone'), { code: 404 }); }, { sleep }), /gone/);
   assert.equal(calls, 1);
+});
+
+test('the welcome notifications have fixed, unique ids and point where the App can go', () => {
+  const ids = WELCOME_NOTIFICATIONS.map((n) => n._id);
+  assert.equal(new Set(ids).size, 3);
+  for (const id of ids) assert.ok(z.string().uuid().safeParse(id).success, id);
+  assert.deepEqual(WELCOME_NOTIFICATIONS.map((n) => n.actionUrl), [SUPPORT_URL, '/energypage', null]);
+  assert.equal(new URL(SUPPORT_URL).protocol, 'https:');
+  for (const n of WELCOME_NOTIFICATIONS) assert.equal(/[—;]/.test(n.description + n.subject), false, n.subject);
 });

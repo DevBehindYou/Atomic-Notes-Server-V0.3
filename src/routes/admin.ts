@@ -279,6 +279,9 @@ admin.post('/notifications', async (c) => {
       );
     }
     audienceSize = userIds.length;
+  } else if (doc.targetAudience === 'new') {
+    // Nobody yet: it reaches accounts created from now on.
+    audienceSize = 0;
   } else {
     audienceSize = await collections.users(db).countDocuments({});
   }
