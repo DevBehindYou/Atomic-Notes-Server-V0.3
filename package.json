@@ -2,6 +2,7 @@
   "name": "atomic-notes-server",
   "version": "0.2.0",
   "private": true,
+  "license": "UNLICENSED",
   "type": "module",
   "scripts": {
     "dev": "node --env-file-if-exists=.env --import tsx --watch src/dev.ts",

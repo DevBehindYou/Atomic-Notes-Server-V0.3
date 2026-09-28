@@ -290,3 +290,7 @@ The Flutter app (`Project-Atomic-Notes`) and Atomic Community (the Next.js
 site + Controller panel) have both since been migrated to call this server
 instead of Supabase directly — see their own repos/READMEs for what changed
 on each side. This server is the single backend all three now share.
+
+## License
+
+Proprietary and confidential. Copyright (c) 2026 Ashutosh Sharma (DevBehindYou). All rights reserved. See [LICENSE](LICENSE). No permission is granted to view, copy, modify, deploy or reuse this code without written permission.
