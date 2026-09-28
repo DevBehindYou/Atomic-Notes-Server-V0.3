@@ -114,9 +114,17 @@ async function getOrInitWallet(db: Db, userId: string): Promise<AtomicUserDoc> {
 /** The wallet, created with its welcome gift if missing. One read when it already exists. */
 export const energyWallet = getOrInitWallet;
 
-/** True when the rolling 24 hours since the last daily grant have passed. */
-export const dailyGrantDue = (wallet: AtomicUserDoc, now = new Date()) =>
-  wallet.lastDailyGrantAt === null || wallet.lastDailyGrantAt.getTime() <= now.getTime() - ENERGY.dailyGrantWindowMs;
+/**
+ * Whole days of daily energy owed: 1 for a wallet that never had a grant, else one per full 24 hours since the
+ * last scheduled grant. 0 means the next grant is not due yet.
+ */
+export function dailyGrantDays(wallet: Pick<AtomicUserDoc, 'lastDailyGrantAt'>, now = new Date()): number {
+  if (wallet.lastDailyGrantAt === null) return 1;
+  return Math.max(0, Math.floor((now.getTime() - wallet.lastDailyGrantAt.getTime()) / ENERGY.dailyGrantWindowMs));
+}
+
+/** True when at least one daily grant is owed. */
+export const dailyGrantDue = (wallet: AtomicUserDoc, now = new Date()) => dailyGrantDays(wallet, now) > 0;
 
 /** energy_ensure — idempotent wallet init. Safe to call as often as needed. */
 export async function energyEnsure(db: Db, userId: string): Promise<void> {
@@ -142,31 +150,36 @@ async function writeLedger(
   );
 }
 
-/** energy_grant_daily — +20 energy once per rolling 24h, server-clock-enforced. */
+/**
+ * energy_grant_daily: +20 energy for every day, server-clock-enforced, up to the energy cap.
+ *
+ * Every wallet has a fixed daily grant time: the first grant starts it, and each later grant moves it forward by
+ * whole days only. So opening the App later in the day never pushes tomorrow's grant back, and days the App was
+ * not opened are paid on the next open (still stopped by the cap). A silent no-op when nothing is owed, matching
+ * the App's fire-and-forget call on every launch and sync.
+ */
 export async function energyGrantDaily(db: Db, userId: string): Promise<void> {
   await getOrInitWallet(db, userId);
   await withTransaction(async (session) => {
     const col = collections.atomicUsers(db);
     const now = new Date();
-    const cutoff = new Date(now.getTime() - ENERGY.dailyGrantWindowMs);
 
-    const wallet = await col.findOne(
-      { _id: userId, $or: [{ lastDailyGrantAt: null }, { lastDailyGrantAt: { $lte: cutoff } }] },
-      { session },
-    );
-    // No matching document -> already granted within the last 24h -> silent
-    // no-op, matching the live app's fire-and-forget call on every launch.
+    const wallet = await col.findOne({ _id: userId }, { session });
     if (!wallet) return;
+    const days = dailyGrantDays(wallet, now);
+    if (days === 0) return;
 
-    const actualDelta = Math.max(0, Math.min(ENERGY.dailyGrant, wallet.energyCap - wallet.energy));
+    const scheduledAt = wallet.lastDailyGrantAt === null
+      ? now
+      : new Date(wallet.lastDailyGrantAt.getTime() + days * ENERGY.dailyGrantWindowMs);
+    const actualDelta = Math.max(0, Math.min(days * ENERGY.dailyGrant, wallet.energyCap - wallet.energy));
 
-    // Re-assert the eligibility window in the filter, not just the read above,
-    // so a concurrent grant (two devices opening at once) can't double-apply —
-    // MongoDB detects the write conflict between the two transactions either way,
-    // but this keeps the guard explicit rather than relying only on that.
+    // The filter repeats what was read, so a concurrent grant (two devices opening at once) can't double-apply:
+    // MongoDB detects the write conflict between the two transactions either way, and the retry then finds
+    // nothing owed. This keeps the guard explicit rather than relying only on that.
     const updated = await col.findOneAndUpdate(
-      { _id: userId, $or: [{ lastDailyGrantAt: null }, { lastDailyGrantAt: { $lte: cutoff } }] },
-      { $inc: { energy: actualDelta }, $set: { lastDailyGrantAt: now } },
+      { _id: userId, lastDailyGrantAt: wallet.lastDailyGrantAt },
+      { $inc: { energy: actualDelta }, $set: { lastDailyGrantAt: scheduledAt } },
       { returnDocument: 'after', session },
     );
     if (!updated || actualDelta === 0) return;
@@ -178,7 +191,7 @@ export async function energyGrantDaily(db: Db, userId: string): Promise<void> {
       energyDelta: actualDelta,
       resultingCoins: updated.coins,
       resultingEnergy: updated.energy,
-      note: 'Daily energy grant',
+      note: days > 1 ? `Daily energy grant (${days} days)` : 'Daily energy grant',
     });
   });
 }
