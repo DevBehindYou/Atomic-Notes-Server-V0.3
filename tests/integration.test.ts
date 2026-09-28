@@ -174,6 +174,42 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal((await collections.atomicUsers(db).findOne({ _id: walletUser.id }))!.energy, 60);
   });
 
+  await t.test('daily energy keeps its time of day, pays missed days and stops at the cap', async () => {
+    const HOUR = 60 * 60 * 1000, DAY = 24 * HOUR;
+    const walletUser = await user();
+    await energyEnsure(db, walletUser.id);
+    const wallet = () => collections.atomicUsers(db).findOne({ _id: walletUser.id }).then((w) => w!);
+    const set = (fields: object) => collections.atomicUsers(db).updateOne({ _id: walletUser.id }, { $set: fields });
+
+    // Not due yet: 23 hours after the last grant, nothing changes.
+    const recent = new Date(Date.now() - 23 * HOUR);
+    await set({ energy: 10, lastDailyGrantAt: recent });
+    await energyGrantDaily(db, walletUser.id);
+    assert.equal((await wallet()).energy, 10);
+    assert.equal((await wallet()).lastDailyGrantAt!.getTime(), recent.getTime());
+
+    // Opened 3 days and 5 hours later: three grants, and the next one stays at the same time of day.
+    const anchor = new Date(Date.now() - 3 * DAY - 5 * HOUR);
+    await set({ energy: 0, lastDailyGrantAt: anchor });
+    await energyGrantDaily(db, walletUser.id);
+    let w = await wallet();
+    assert.equal(w.energy, 60);
+    assert.equal(w.lastDailyGrantAt!.getTime(), anchor.getTime() + 3 * DAY);
+    const row = await collections.energyLedger(db).find({ userId: walletUser.id, kind: 'daily_grant' }).sort({ createdAt: -1 }).next();
+    assert.equal(row!.energyDelta, 60);
+    assert.equal(row!.note, 'Daily energy grant (3 days)');
+
+    // Days owed are still limited by the cap.
+    await set({ energy: 110, lastDailyGrantAt: new Date(Date.now() - 2 * DAY - HOUR) });
+    await energyGrantDaily(db, walletUser.id);
+    w = await wallet();
+    assert.equal(w.energy, 120);
+
+    // A second call right after pays nothing more.
+    await energyGrantDaily(db, walletUser.id);
+    assert.equal((await wallet()).energy, 120);
+  });
+
   await t.test('Community notification CRUD hides targeted and expired messages', async () => {
     assert.equal((await request('/admin/notifications')).status, 401);
     const adminRequest = (method: string, body?: object, query = '') => request(`/admin/notifications${query}`, method, body, undefined, 'test-admin-key');
