@@ -1,0 +1,118 @@
+ATOMIC NOTES PROPRIETARY LICENSE
+Version 1.0, effective 28 September 2026
+
+Copyright (c) 2026 Ashutosh Sharma (DevBehindYou). All rights reserved.
+
+PROPRIETARY AND CONFIDENTIAL. This repository and everything in it is the
+confidential property of the Licensor. No license or right is granted except
+as written below.
+
+
+1. DEFINITIONS
+
+"Licensor" means Ashutosh Sharma, who publishes as DevBehindYou, and anyone
+the Licensor assigns this Software to.
+
+"Software" means everything in this repository, in every version published or
+committed on or after the Effective Date: source code, compiled builds,
+configuration, database schemas, scripts, documentation, text, designs,
+images and the Atomic Notes names and brand elements.
+
+"Authorized Person" means an individual the Licensor has given access to this
+repository in writing, for example by adding them as a collaborator.
+
+"Effective Date" means 28 September 2026.
+
+
+2. NO LICENSE TO THE PUBLIC
+
+No permission of any kind is granted to anyone who is not an Authorized
+Person. Without the Licensor's prior written permission, you may not view,
+copy, reproduce, store, modify, create derivative works of, distribute,
+publish, sell, sublicense, host, run, deploy, decompile or reverse engineer
+the Software or any part of it, use it in any other product or service, or
+use it to train, fine-tune or evaluate any machine-learning or
+artificial-intelligence system.
+
+
+3. AUTHORIZED PERSONS
+
+An Authorized Person may access and use the Software only to work on it for
+the Licensor, and only for as long as the Licensor allows. An Authorized
+Person must:
+
+  (a) keep the Software, and everything learned from it, confidential;
+
+  (b) never share, copy or publish credentials, keys, tokens, environment
+      files, user data or infrastructure details found in or through the
+      Software;
+
+  (c) not use the Software for their own benefit or for anyone other than
+      the Licensor; and
+
+  (d) delete every copy of the Software when the Licensor ends their access.
+
+
+4. OWNERSHIP AND CONTRIBUTIONS
+
+The Licensor owns all right, title and interest in the Software, including
+all copyrights, trade secrets and trademarks. Each Authorized Person assigns
+to the Licensor all rights in any code, text, designs or other material they
+contribute to the Software. Where an assignment is not possible under the
+law, the contributor grants the Licensor an exclusive, perpetual, worldwide,
+irrevocable, royalty-free, transferable and sublicensable license to use it
+for any purpose.
+
+
+5. EARLIER VERSIONS
+
+Versions of this repository that were public before the Effective Date were
+made available under the MIT License. Anyone who received one of those
+earlier versions keeps the rights the MIT License gave them for that version
+only. This License applies to every version published or committed on or
+after the Effective Date.
+
+
+6. THIRD-PARTY COMPONENTS
+
+Third-party libraries and other components used by the Software remain
+under their own licenses. This License does not apply to them.
+
+
+7. SECURITY
+
+If you find a security weakness in the Software or the services it runs,
+report it privately to the Licensor through the contact details at
+https://github.com/DevBehindYou. Do not access, change or keep anyone else's
+data, and do not disrupt any service.
+
+
+8. TERMINATION
+
+Any access or permission ends automatically if its terms are broken, and at
+any time the Licensor chooses. Sections 2 and 4 to 11 survive termination.
+
+
+9. NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
+
+
+10. LIMITATION OF LIABILITY
+
+TO THE FULLEST EXTENT THE LAW ALLOWS, IN NO EVENT SHALL THE LICENSOR BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OF OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+11. ENFORCEMENT
+
+Unauthorized use of the Software infringes the Licensor's rights and may
+cause harm that money cannot fully repair. The Licensor may seek an
+injunction and any other remedy the law allows. If a court finds any part of
+this License unenforceable, that part is limited to the minimum extent
+necessary and the rest stays in force. Failure to enforce any term is not a
+waiver of it.
