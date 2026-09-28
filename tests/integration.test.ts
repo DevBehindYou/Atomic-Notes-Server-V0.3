@@ -769,6 +769,8 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     const toBystander = await publish({ target_user_id: bystander.id });
     const active = await publish({ target_audience: 'active' });
     const inactive = await publish({ target_audience: 'inactive' });
+    const welcome = await publish({ target_audience: 'new' });
+    assert.equal(welcome.size, 0, 'nobody yet: it reaches accounts created from now on');
     const pinned = await publish({ priority: 'critical', dismissible: false });
     const expired = await publish({ expires_at: new Date(Date.now() - 1000).toISOString() });
     const resolved = await publish({ status: 'resolved' });
@@ -790,6 +792,14 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     const dormantSees = await ids(dormant, '1.18.2');
     for (const n of [everyone, inactive, pinned]) assert.ok(dormantSees.has(n.id));
     for (const n of [active, toReader]) assert.ok(!dormantSees.has(n.id));
+    // A welcome for new accounts: not for accounts made before it, yes for one made after.
+    assert.ok(!readerSees.has(welcome.id) && !dormantSees.has(welcome.id));
+    const newcomer = await user();
+    const newcomerSees = await ids(newcomer, '1.18.2');
+    for (const n of [welcome, everyone, pinned]) assert.ok(newcomerSees.has(n.id));
+    assert.ok(!newcomerSees.has(active.id), 'active was decided before the account existed');
+    assert.equal(((await json(await request('/public/notifications/active'))).rows as { id: string }[]).some((n) => n.id === welcome.id), false,
+      'welcome messages stay off the public website');
     // An App that does not send its version sees every range.
     const anyVersion = await ids(reader);
     assert.ok(anyVersion.has(newAppsOnly.id) && anyVersion.has(oldAppsOnly.id));
