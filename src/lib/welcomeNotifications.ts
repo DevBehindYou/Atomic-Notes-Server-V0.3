@@ -1,6 +1,9 @@
 import type { NotificationDoc } from '../db/collections.js';
 
-/** The support page on the Atomic Notes website: Patreon, and how the early-supporter coins are sent. */
+/**
+ * The support page on the Atomic Notes website: where to support, and how the early-supporter coins are sent.
+ * The notifications themselves name no payment platform; the page does.
+ */
 export const SUPPORT_URL = 'https://atomic-notes-community.vercel.app/support-atomic-notes';
 
 type WelcomeText = Pick<NotificationDoc, '_id' | 'type' | 'subject' | 'description' | 'priority' | 'action' | 'actionUrl'>;
@@ -17,11 +20,10 @@ export const WELCOME_NOTIFICATIONS: readonly WelcomeText[] = [
     type: 'general',
     subject: 'Get Atomic Coins early',
     description:
-      'Atomic Notes is built by one developer. Support the project on Patreon at the amount you choose, send your '
-      + 'Atomic Notes account email in a Patreon message, and the developer will send you Atomic Coins as an '
-      + 'early-supporter reward.',
+      'Atomic Notes is built by one developer. Support the project at the amount you choose, share your Atomic '
+      + 'Notes account email, and the developer will send you Atomic Coins as an early-supporter reward.',
     priority: 'low',
-    action: 'Support on Patreon',
+    action: 'Support Atomic Notes',
     actionUrl: SUPPORT_URL,
   },
   {

@@ -258,4 +258,8 @@ test('the welcome notifications have fixed, unique ids and point where the App c
   assert.deepEqual(WELCOME_NOTIFICATIONS.map((n) => n.actionUrl), [SUPPORT_URL, '/energypage', null]);
   assert.equal(new URL(SUPPORT_URL).protocol, 'https:');
   for (const n of WELCOME_NOTIFICATIONS) assert.equal(/[—;]/.test(n.description + n.subject), false, n.subject);
+  // No payment platform by name: the website's support page says where to go.
+  for (const n of WELCOME_NOTIFICATIONS) {
+    assert.equal(/patreon|ko-?fi|paypal|buy ?me ?a ?coffee/i.test(`${n.subject} ${n.description} ${n.action ?? ''}`), false, n.subject);
+  }
 });
