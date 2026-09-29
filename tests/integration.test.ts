@@ -853,8 +853,14 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal((await post(`/${pinned.id}/dismiss`)).status, 409);
     assert.equal((await post(`/${toReader.id}/dismiss`)).status, 200);
     assert.ok(!(await ids(reader)).has(toReader.id), 'dismissed');
+    // Reading all in this App version must not pre-read an excluded-version
+    // announcement. The no-version request remains compatible with old Apps.
+    assert.equal((await post('/read-all?app_version=2.03.5')).status, 200);
+    assert.ok((await feed(reader, '2.03.5')).every((n) => n.is_read));
+    assert.equal((await feed(reader)).find((n) => n.id === oldAppsOnly.id)!.is_read, false);
+    assert.equal((await post('/read-all?app_version=bad')).status, 400);
     const all = await json(await post('/read-all'));
-    assert.ok(all.marked >= 2);
+    assert.ok(all.marked >= 1);
     assert.ok((await feed(reader)).every((n) => n.is_read));
     assert.equal((await request('/notifications')).status, 401);
 
