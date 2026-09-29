@@ -23,7 +23,8 @@ notifications.get('/', async (c) => {
 notifications.post('/read-all', async (c) => {
   const db = await getDb();
   const userId = c.get('userId') as string;
-  const unread = (await feedFor(db, userId)).filter((item) => !item.state?.readAt);
+  const appVersion = appVersionSchema.parse(c.req.query('app_version') || undefined);
+  const unread = (await feedFor(db, userId, appVersion)).filter((item) => !item.state?.readAt);
   await Promise.all(unread.map((item) => markNotification(db, userId, item.notification._id)));
   return c.json({ ok: true, marked: unread.length });
 });
