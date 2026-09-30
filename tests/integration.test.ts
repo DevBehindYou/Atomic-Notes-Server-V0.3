@@ -51,6 +51,7 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
   await ensureIndexes(db);
 
   const files = new Map<string, any>();
+  let afterUpdateWrite: (() => Promise<void>) | null = null;
   let writes = 0, failDelete = false, failTitle = '', activeReads = 0, peakReads = 0, activeWrites = 0, peakWrites = 0;
   // Simulates what a user can do in Drive outside the app.
   const missingFiles = new Set<string>(); let missingFolder = '', foldersEnsured = 0;
@@ -71,7 +72,7 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
       if (missingFiles.has(id)) throw notFound();
       if ((content as any).title === failTitle && failTitle) throw new Error('simulated_drive_failure');
       peakWrites = Math.max(peakWrites, ++activeWrites); await delay(5); activeWrites--;
-      writes++; files.set(id, structuredClone(content)); return { id, headRevisionId: '2' };
+      writes++; files.set(id, structuredClone(content)); await afterUpdateWrite?.(); return { id, headRevisionId: '2' };
     },
     async deleteNoteFile(_a: string, _r: string, id: string) {
       if (missingFiles.has(id)) throw notFound();
@@ -412,6 +413,78 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
       assert.equal((await json(stale)).results[0].error, 'note_conflict');
       assert.equal(writes, beforeWrites);
     }
+  });
+
+  await t.test('R11 pull rejects Drive content written ahead of its metadata commit', async () => {
+    const account = await user(), note = row({ title: 'committed title' });
+    assert.equal((await push([note], account.token)).status, 200);
+    await refill(account.id);
+    let release!: () => void, entered!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const stored = new Promise<void>((resolve) => { entered = resolve; });
+    afterUpdateWrite = async () => { entered(); await blocked; };
+    const pushing = push([{ ...note, title: 'uncommitted title', base_version: 1 }], account.token);
+    let completed: Response;
+    try {
+      await stored;
+      const response = await request('/notes/pull?after=0', 'GET', undefined, account.token);
+      assert.equal(response.status, 409);
+      const body = await json(response);
+      assert.deepEqual(body, { error: 'note_content_mismatch' });
+      assert.ok(!JSON.stringify(body).includes('uncommitted title'));
+      assert.equal((await collections.notes(db).findOne({ _id: note.id }))!.localVersion, 1);
+    } finally { afterUpdateWrite = null; release(); completed = await pushing; }
+    assert.equal(completed.status, 200);
+    const retry = await request('/notes/pull?after=0', 'GET', undefined, account.token);
+    assert.equal(retry.status, 200);
+    const rows = (await json(retry)).rows;
+    assert.deepEqual(rows.map((r: any) => [r.version, r.title]), [[2, 'uncommitted title']]);
+  });
+
+  await t.test('R11 pull rejects persistent ciphertext mismatch without returning content or advancing a cursor', async () => {
+    const account = await user(), note = row({ enc_v: 1, payload: 'fixture-cipher-a', title: '', body: '', items: [] });
+    assert.equal((await push([note], account.token)).status, 200);
+    const metadata = (await collections.notes(db).findOne({ _id: note.id }))!;
+    const committed = structuredClone(files.get(metadata.driveFileId));
+    files.set(metadata.driveFileId, { ...committed, payload: 'fixture-cipher-b' });
+    try {
+      for (let retry = 0; retry < 2; retry++) {
+        const response = await request('/notes/pull?after=0', 'GET', undefined, account.token);
+        assert.equal(response.status, 409);
+        assert.deepEqual(await json(response), { error: 'note_content_mismatch' });
+      }
+      assert.equal((await collections.notes(db).findOne({ _id: note.id }))!.contentHash, metadata.contentHash);
+      assert.equal(files.get(metadata.driveFileId).payload, 'fixture-cipher-b', 'pull must not rewrite Drive');
+    } finally { files.set(metadata.driveFileId, committed); }
+    const retry = await request('/notes/pull?after=0', 'GET', undefined, account.token);
+    assert.equal(retry.status, 200);
+    assert.equal((await json(retry)).rows[0].payload, 'fixture-cipher-a');
+  });
+
+  await t.test('R11 pull rejects a different note ID even when the content fingerprint matches', async () => {
+    const account = await user(), note = row();
+    assert.equal((await push([note], account.token)).status, 200);
+    const metadata = (await collections.notes(db).findOne({ _id: note.id }))!;
+    const committed = structuredClone(files.get(metadata.driveFileId));
+    files.set(metadata.driveFileId, { ...committed, id: randomUUID() });
+    try {
+      const response = await request('/notes/pull?after=0', 'GET', undefined, account.token);
+      assert.equal(response.status, 409);
+      assert.deepEqual(await json(response), { error: 'note_content_mismatch' });
+    } finally { files.set(metadata.driveFileId, committed); }
+  });
+
+  await t.test('pull fingerprint compatibility covers normalized checklists and legacy rows without hashes', async () => {
+    const account = await user(), note = row({ kind: 'todo', items: [{ t: 'fixture item', d: true }] });
+    assert.equal((await push([note], account.token)).status, 200);
+    const pull = async () => {
+      const response = await request('/notes/pull?after=0', 'GET', undefined, account.token);
+      assert.equal(response.status, 200);
+      assert.deepEqual((await json(response)).rows[0].items, [{ text: 'fixture item', done: true }]);
+    };
+    await pull();
+    await collections.notes(db).updateOne({ _id: note.id }, { $unset: { contentHash: '' } });
+    await pull();
   });
 
   await t.test('concurrent creates cannot exceed the note quota', async () => {
