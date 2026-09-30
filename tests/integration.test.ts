@@ -709,13 +709,15 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
 
   await t.test('R12 only successful deletions supply capacity in a partially failing replacement batch', async () => {
     const account = await user(), a = row({ title: 'DELETE_FAIL' }), b = row();
-    assert.equal((await push([a, b], account.token)).status, 200);
+    const initial = await push([a, b], account.token);
+    assert.equal(initial.status, 200);
+    const versions = new Map<string, number>((await json(initial)).results.map((r: any) => [r.id, r.version]));
     await refill(account.id);
     await collections.atomicUsers(db).updateOne({ _id: account.id }, { $set: { noteLimit: 2 } });
     const c = row(), d = row();
     failTitle = 'DELETE_FAIL';
     try {
-      const response = await push([c, d, { ...a, deleted: true, base_version: 1 }, { ...b, deleted: true, base_version: 1 }], account.token);
+      const response = await push([c, d, { ...a, deleted: true, base_version: versions.get(a.id) }, { ...b, deleted: true, base_version: versions.get(b.id) }], account.token);
       assert.equal(response.status, 502);
       const body = await json(response);
       assert.equal(await collections.notes(db).countDocuments({ userId: account.id, deleted: false }), 2);
@@ -736,7 +738,7 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     await collections.atomicUsers(db).updateOne({ _id: account.id }, { $set: { noteLimit: 1 } });
     failDelete = true;
     try {
-      const response = await push([{ ...deleted, title: 'RESTORED', deleted: false, base_version: 1 }, { ...active, deleted: true, base_version: 1 }], account.token);
+      const response = await push([{ ...deleted, title: 'RESTORED', deleted: false, base_version: tombstone.localVersion }, { ...active, deleted: true, base_version: 1 }], account.token);
       assert.equal(response.status, 502);
       assert.equal(await collections.notes(db).countDocuments({ userId: account.id, deleted: false }), 1);
       assert.equal((await collections.notes(db).findOne({ _id: deleted.id }))!.deleted, true);
