@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { getDb } from '../db/mongo.js';
-import { collections, type AtomicUserDoc } from '../db/collections.js';
+import { type AtomicUserDoc } from '../db/collections.js';
 import { requireAuth } from '../middleware/auth.js';
 import {
   ENERGY,
@@ -14,6 +14,8 @@ import {
   energyUpgradeNoteLimit,
   energyHistory,
 } from '../lib/energy.js';
+
+import { coinDetails, readCoinWallet } from '../lib/coinLots.js';
 
 const energy = new Hono();
 energy.use('*', requireAuth);
@@ -37,6 +39,7 @@ function walletToWire(w: AtomicUserDoc | null) {
   return w
     ? {
         coins: w.coins,
+        coin_expiry_enabled: w.coinLotsVersion === 1,
         energy: w.energy,
         energy_cap: w.energyCap,
         note_limit: w.noteLimit,
@@ -81,22 +84,24 @@ energy.get('/', async (c) => {
   await energyEnsure(db, userId);
   await energyGrantDaily(db, userId);
 
-  const wallet = await collections.atomicUsers(db).findOne({ _id: userId });
+  const wallet = await readCoinWallet(db, userId);
   const history = await energyHistory(db, userId);
-  return c.json({ wallet: walletToWire(wallet), history: historyToWire(history), limits: limitsToWire() });
+  const details = wallet?.coinLotsVersion === 1 ? await coinDetails(db, userId) : null;
+  return c.json({ wallet: walletToWire(wallet && details?.enabled ? { ...wallet, coins: details.coins! } : wallet),
+    coin_details: details, history: historyToWire(history), limits: limitsToWire() });
 });
 
-const convertSchema = z.object({ coins: z.number().int().positive() });
+const convertSchema = z.object({ coins: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), request_id: z.string().uuid().optional() });
 energy.post('/convert', async (c) => {
   const userId = c.get('userId') as string;
   const db = await getDb();
-  const { coins } = convertSchema.parse(await c.req.json());
+  const { coins, request_id } = convertSchema.parse(await c.req.json());
   try {
-    await energyConvert(db, userId, coins);
+    await energyConvert(db, userId, coins, request_id);
   } catch (e) {
     return handleEnergyError(c, e);
   }
-  const wallet = await collections.atomicUsers(db).findOne({ _id: userId });
+  const wallet = await readCoinWallet(db, userId);
   return c.json({ wallet: walletToWire(wallet) });
 });
 
@@ -104,17 +109,29 @@ energy.post('/convert', async (c) => {
  * POST /energy/note-limit — buys the next tier of note capacity with coins, up to the ceiling.
  * [from_limit] is the limit the App showed, which makes a repeated call harmless.
  */
-const noteLimitSchema = z.object({ from_limit: z.number().int().nonnegative() });
+const noteLimitSchema = z.object({ from_limit: z.number().int().nonnegative(), request_id: z.string().uuid().optional() });
 energy.post('/note-limit', async (c) => {
   const userId = c.get('userId') as string;
   const db = await getDb();
-  const { from_limit } = noteLimitSchema.parse(await c.req.json());
+  const { from_limit, request_id } = noteLimitSchema.parse(await c.req.json());
   try {
-    const wallet = await energyUpgradeNoteLimit(db, userId, from_limit);
+    await energyUpgradeNoteLimit(db, userId, from_limit, request_id);
+    const wallet = await readCoinWallet(db, userId);
     return c.json({ wallet: walletToWire(wallet), limits: limitsToWire() });
   } catch (e) {
     return handleEnergyError(c, e);
   }
+});
+
+const cursorSchema = z.object({ at: z.string().datetime(), id: z.string().min(1).max(100) });
+energy.get('/coins', async (c) => {
+  const db = await getDb();
+  const userId = c.get('userId') as string;
+  await energyEnsure(db, userId);
+  const cursor = c.req.query('cursor');
+  if (cursor && cursor.length > 512) return c.json({ error: 'invalid_cursor' }, 400);
+  const decoded = cursor ? cursorSchema.parse(JSON.parse(Buffer.from(cursor, 'base64url').toString())) : null;
+  return c.json(await coinDetails(db, userId, decoded ? { at: new Date(decoded.at), id: decoded.id } : undefined));
 });
 
 // Charging is done by the Server when a sync runs. A client can neither spend nor refund energy itself.

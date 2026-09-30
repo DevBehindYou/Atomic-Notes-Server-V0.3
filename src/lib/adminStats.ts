@@ -38,7 +38,14 @@ export async function computeControllerStats(db: Db) {
     collections
       .atomicUsers(db)
       .aggregate<{ coins: number; energy: number }>([
-        { $group: { _id: null, coins: { $sum: '$coins' }, energy: { $sum: '$energy' } } },
+        // Unmigrated balances are grandfathered. Migrated balances exclude due lots even for inactive users.
+        { $lookup: { from: 'coin_lots', let: { userId: '$_id' }, pipeline: [
+          { $match: { $expr: { $and: [{ $eq: ['$userId', '$$userId'] }, { $gt: ['$remaining', 0] },
+            { $or: [{ $eq: ['$expiresAt', null] }, { $gt: ['$expiresAt', new Date()] }] }] } } },
+          { $group: { _id: null, coins: { $sum: '$remaining' } } },
+        ], as: 'spendable' } },
+        { $group: { _id: null, coins: { $sum: { $cond: [{ $eq: ['$coinLotsVersion', 1] },
+          { $ifNull: [{ $arrayElemAt: ['$spendable.coins', 0] }, 0] }, '$coins'] } }, energy: { $sum: '$energy' } } },
       ])
       .toArray(),
     collections.notifications(db).countDocuments({ status: 'active' }),
