@@ -648,6 +648,67 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal(await collections.notes(db).countDocuments({ userId: account.id, deleted: false }), 2);
   });
 
+  await t.test('R12 a failed deletion cannot fund a new note and failed replay refunds only once', async () => {
+    const account = await user(), original = row(), replacement = row();
+    assert.equal((await push([original], account.token)).status, 200);
+    await refill(account.id);
+    await collections.atomicUsers(db).updateOne({ _id: account.id }, { $set: { noteLimit: 1 } });
+    const rows = [replacement, { ...original, deleted: true, base_version: 1 }], requestId = randomUUID();
+    failDelete = true;
+    try {
+      const response = await push(rows, account.token, requestId);
+      assert.equal(response.status, 502);
+      const body = await json(response);
+      assert.equal(await collections.notes(db).countDocuments({ userId: account.id, deleted: false }), 1);
+      assert.equal(await collections.notes(db).findOne({ _id: replacement.id }), null);
+      assert.ok(![...files.values()].some((file) => file.id === replacement.id), 'blocked insert must not write Drive');
+      assert.ok(body.results.every((r: any) => !r.ok));
+      assert.deepEqual([body.charged, body.refunded], [5, 5]);
+      assert.equal((await wallet(account.id)).energy, 100);
+      const afterWrites = writes;
+      assert.deepEqual(await json(await push(rows, account.token, requestId)), body);
+      assert.equal(writes, afterWrites);
+      assert.equal(await refundCount(account.id), 1);
+    } finally { failDelete = false; }
+  });
+
+  await t.test('R12 only successful deletions supply capacity in a partially failing replacement batch', async () => {
+    const account = await user(), a = row({ title: 'DELETE_FAIL' }), b = row();
+    assert.equal((await push([a, b], account.token)).status, 200);
+    await refill(account.id);
+    await collections.atomicUsers(db).updateOne({ _id: account.id }, { $set: { noteLimit: 2 } });
+    const c = row(), d = row();
+    failTitle = 'DELETE_FAIL';
+    try {
+      const response = await push([c, d, { ...a, deleted: true, base_version: 1 }, { ...b, deleted: true, base_version: 1 }], account.token);
+      assert.equal(response.status, 502);
+      const body = await json(response);
+      assert.equal(await collections.notes(db).countDocuments({ userId: account.id, deleted: false }), 2);
+      assert.equal(body.results.find((r: any) => r.id === b.id).ok, true);
+      assert.equal(body.results.find((r: any) => r.id === c.id).ok, true);
+      assert.equal(body.results.find((r: any) => r.id === d.id).ok, false);
+      assert.ok(![...files.values()].some((file) => file.id === d.id));
+      assert.deepEqual([body.charged, body.refunded], [5, 0]);
+    } finally { failTitle = ''; }
+  });
+
+  await t.test('R12 a failed deletion cannot fund restoration of a tombstone', async () => {
+    const account = await user(), active = row(), deleted = row({ deleted: true });
+    assert.equal((await push([active, deleted], account.token)).status, 200);
+    const tombstone = (await collections.notes(db).findOne({ _id: deleted.id }))!;
+    const priorFile = structuredClone(files.get(tombstone.driveFileId));
+    await refill(account.id);
+    await collections.atomicUsers(db).updateOne({ _id: account.id }, { $set: { noteLimit: 1 } });
+    failDelete = true;
+    try {
+      const response = await push([{ ...deleted, title: 'RESTORED', deleted: false, base_version: 1 }, { ...active, deleted: true, base_version: 1 }], account.token);
+      assert.equal(response.status, 502);
+      assert.equal(await collections.notes(db).countDocuments({ userId: account.id, deleted: false }), 1);
+      assert.equal((await collections.notes(db).findOne({ _id: deleted.id }))!.deleted, true);
+      assert.deepEqual(files.get(tombstone.driveFileId), priorFile, 'blocked restore must not alter Drive');
+    } finally { failDelete = false; }
+  });
+
   await t.test('note capacity is bought one tier at a time, the last tier costs more, and a repeated call charges once', async () => {
     const account = await user();
     const upgrade = (from: number) => request('/energy/note-limit', 'POST', { from_limit: from }, account.token);

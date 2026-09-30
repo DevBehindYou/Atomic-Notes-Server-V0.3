@@ -97,15 +97,6 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
     return { accessToken, refreshToken, driveFolderId: account.driveRootFolderId };
   }
 
-  async function enforceNoteLimit(db: Awaited<ReturnType<typeof getDb>>, userId: string, incomingNewCount: number) {
-    if (incomingNewCount <= 0) return null;
-    const wallet = await collections.atomicUsers(db).findOne({ _id: userId });
-    const noteLimit = wallet?.noteLimit ?? NOTE_LIMIT.free;
-    const activeCount = await collections.notes(db).countDocuments({ userId, deleted: false });
-    if (activeCount + incomingNewCount > noteLimit) return { error: 'note_limit_reached' as const, limit: noteLimit };
-    return null;
-  }
-
   // ---------------------------------------------------------------------------
   // Per-note REST CRUD — a simpler surface than /push and /pull below, for
   // anything that isn't the bulk sync path.
@@ -200,8 +191,19 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
     const existingOf = (r: { id: string }) => existingById.get(r.id);
     const addsNote = (r: (typeof rows)[number]) => !r.deleted && (!existingOf(r) || existingOf(r)!.deleted);
     const freesRoom = (r: (typeof rows)[number]) => r.deleted && !!existingOf(r) && !existingOf(r)!.deleted && r.base_version === existingOf(r)!.localVersion;
-    const limitError = await enforceNoteLimit(db, userId, rows.filter(addsNote).length - rows.filter(freesRoom).length);
-    if (limitError) return c.json(limitError, 409);
+    const incomingNewCount = rows.filter(addsNote).length;
+    let availableSlots = Number.POSITIVE_INFINITY;
+    if (incomingNewCount > 0) {
+      const wallet = await collections.atomicUsers(db).findOne({ _id: userId });
+      const noteLimit = wallet?.noteLimit ?? NOTE_LIMIT.free;
+      const activeCount = await collections.notes(db).countDocuments({ userId, deleted: false });
+      if (activeCount + incomingNewCount - rows.filter(freesRoom).length > noteLimit) {
+        return c.json({ error: 'note_limit_reached', limit: noteLimit }, 409);
+      }
+      // The optimistic preflight permits replacement batches. Actual admission below
+      // may credit only deletions whose Drive operation succeeded.
+      availableSlots = noteLimit - activeCount;
+    }
 
     const { accessToken, refreshToken, driveFolderId } = await getLiveGoogleTokens(db, userId);
     const operation = recorded ?? await openSync(db, userId, requestId, rows, mode);
@@ -294,10 +296,43 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
       }
       return { driveFileId, driveRevisionId };
     };
-    const written = await mapConcurrent(jobs, DRIVE_CONCURRENCY, async (job) => {
+    const write = async (job: Job) => {
       try { return { ok: true as const, ...(await writeToDrive(job)) }; }
       catch (error) { return { ok: false as const, error }; }
-    });
+    };
+    type WriteResult = Awaited<ReturnType<typeof write>>;
+    let written: WriteResult[];
+    if (incomingNewCount > availableSlots) {
+      // This request needs deletions to make room. Settle them first, then reserve
+      // only real slots before starting inserts/restores. All successful metadata
+      // and results still commit in the existing single transaction, in row order.
+      const deletions = jobs.filter((job) => freesRoom(job.row));
+      const deleted = await mapConcurrent(deletions, DRIVE_CONCURRENCY, write);
+      const outcomes = new Map<Job, WriteResult>();
+      deletions.forEach((job, i) => {
+        outcomes.set(job, deleted[i]);
+        if (deleted[i].ok) availableSlots++;
+      });
+      const admitted: Job[] = [];
+      for (const job of jobs) {
+        if (outcomes.has(job)) continue;
+        if (addsNote(job.row)) {
+          if (availableSlots <= 0) {
+            outcomes.set(job, { ok: false, error: new Error('note_limit_reached') });
+            continue;
+          }
+          // Keep reservations until this request ends even if a later Drive write
+          // fails. A subsequent request can use that space without an ordering race.
+          availableSlots--;
+        }
+        admitted.push(job);
+      }
+      const remaining = await mapConcurrent(admitted, DRIVE_CONCURRENCY, write);
+      admitted.forEach((job, i) => outcomes.set(job, remaining[i]));
+      written = jobs.map((job) => outcomes.get(job)!);
+    } else {
+      written = await mapConcurrent(jobs, DRIVE_CONCURRENCY, write);
+    }
     // A revoked grant fails every row alike. Stop here without recording failures: the operation stays open,
     // the App signs in again and retries the same request, which resumes it.
     if (written.some((w) => !w.ok && isInvalidGrant(w.error))) throw httpError('google_reauth_required', 401);
