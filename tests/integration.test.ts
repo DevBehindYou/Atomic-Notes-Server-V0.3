@@ -542,17 +542,88 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal(await collections.notes(db).findOne({ _id: late.id }), null);
   });
 
-  await t.test('files and folders deleted in Drive: pull skips them, push recreates them, wipe tolerates them', async () => {
+  for (const failure of ['missing', 'corrupt'] as const) {
+    await t.test(`R16 ${failure} live file refuses its page and a repaired file returns at the same cursor`, async () => {
+      const account = await user();
+      const notes = Array.from({ length: 12 }, (_, i) => row({ title: `fixture ${i}` }));
+      assert.equal((await push(notes, account.token)).status, 200);
+      const metadata = await collections.notes(db).find({ userId: account.id }).sort({ syncSequence: 1 }).toArray();
+      const broken = metadata[10];
+      const original = structuredClone(files.get(broken.driveFileId));
+      const counter = await db.collection('sync_counters').findOne({ _id: account.id } as any);
+      const beforeWrites = writes;
+      if (failure === 'missing') missingFiles.add(broken.driveFileId);
+      else files.set(broken.driveFileId, { version: 999 });
+      let cursor: number;
+      try {
+        const first = await request('/notes/pull?after=0', 'GET', undefined, account.token);
+        assert.equal(first.status, 200);
+        const page = await json(first);
+        assert.equal(page.rows.length, 10);
+        assert.equal(page.hasMore, true);
+        cursor = page.nextCursor;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const response = await request(`/notes/pull?after=${cursor}`, 'GET', undefined, account.token);
+          assert.equal(response.status, 409, 'unreadable live content must not advance the cursor');
+          assert.deepEqual(await json(response), { error: 'note_content_unavailable' });
+        }
+        assert.deepEqual(await collections.notes(db).find({ userId: account.id }).sort({ syncSequence: 1 }).toArray(), metadata);
+        assert.deepEqual(await db.collection('sync_counters').findOne({ _id: account.id } as any), counter);
+        assert.equal(writes, beforeWrites, 'pull must not modify Drive');
+      } finally {
+        missingFiles.delete(broken.driveFileId);
+        files.set(broken.driveFileId, original);
+      }
+      // Restore only the fixture file, without editing the note or allocating a new sequence.
+      const retry = await request(`/notes/pull?after=${cursor!}`, 'GET', undefined, account.token);
+      assert.equal(retry.status, 200);
+      const recovered = await json(retry);
+      assert.deepEqual(recovered.rows.map((r: any) => r.id), metadata.slice(10).map((m) => m._id));
+      assert.equal(recovered.nextCursor, counter!.value);
+      assert.equal(recovered.hasMore, false);
+      assert.equal(recovered.skipped, 0);
+      assert.equal(writes, beforeWrites);
+    });
+
+    await t.test(`R16 ${failure} tombstone still delivers a deletion without content`, async () => {
+      const account = await user(), note = row();
+      assert.equal((await push([note], account.token)).status, 200);
+      await refill(account.id);
+      assert.equal((await push([{ ...note, deleted: true, base_version: 1 }], account.token)).status, 200);
+      const metadata = (await collections.notes(db).findOne({ _id: note.id }))!;
+      const original = structuredClone(files.get(metadata.driveFileId));
+      if (failure === 'missing') missingFiles.add(metadata.driveFileId);
+      else files.set(metadata.driveFileId, { version: 999 });
+      try {
+        const response = await request('/notes/pull?after=1', 'GET', undefined, account.token);
+        assert.equal(response.status, 200);
+        const page = await json(response);
+        assert.equal(page.rows.length, 1);
+        assert.equal(page.rows[0].id, note.id);
+        assert.equal(page.rows[0].deleted, true);
+        assert.equal(page.rows[0].title, '');
+        assert.equal(page.rows[0].body, '');
+        assert.equal(page.rows[0].payload, null);
+        assert.equal(page.nextCursor, metadata.syncSequence);
+        assert.equal(page.skipped, 0);
+      } finally {
+        missingFiles.delete(metadata.driveFileId);
+        files.set(metadata.driveFileId, original);
+      }
+    });
+  }
+
+  await t.test('files and folders deleted in Drive: pull refuses live omissions, push recreates them, wipe tolerates them', async () => {
     const account = await user(), a = row({ title: 'A' }), b = row({ title: 'B' });
     assert.equal((await push([a, b], account.token)).status, 200);
     const meta = async (id: string) => (await collections.notes(db).findOne({ _id: id }))!;
     const oldFileOfA = (await meta(a.id)).driveFileId;
     missingFiles.add(oldFileOfA);
 
-    // One permanently deleted file must not stop the account from syncing.
-    const pulled = await json(await request('/notes/pull', 'GET', undefined, account.token));
-    assert.deepEqual(pulled.rows.map((r: any) => r.id), [b.id]);
-    assert.equal(pulled.skipped, 1);
+    // Pull refuses an incomplete page; a later push can still recreate the missing file.
+    const pulled = await request('/notes/pull', 'GET', undefined, account.token);
+    assert.equal(pulled.status, 409);
+    assert.deepEqual(await json(pulled), { error: 'note_content_unavailable' });
     assert.equal(await collections.logs(db).countDocuments({ userId: account.id, event: 'notes_unreadable' }), 1);
 
     // The next edit writes the note to a new file and records it.

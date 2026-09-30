@@ -447,17 +447,22 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
           }
           return toWireRow(m, { title: content.title, body: content.body, items: content.items, payload: content.payload });
         } catch (error) {
-          // A file deleted or corrupted in Drive must not block every other note. Transient Google or
-          // network errors still fail the request so the App retries.
+          // Collect unreadable live files so the page can fail without advancing past them.
+          // Transient Google or network errors also fail the request so the App retries.
           if (!isDriveNotFound(error) && !(error instanceof CorruptAtomicFileError)) throw error;
           // A deleted note whose file is gone still has to reach every device as a deletion, just without content.
           if (m.deleted) return toWireRow(m, { title: '', body: '', items: [], payload: null });
-          // A live note: skip it. Devices that still hold it keep it; their next edit writes the file again.
+          // A live note cannot be silently omitted from a successful page.
           unreadable.push(m._id);
           return null;
         }
       })).filter((row): row is RemoteNoteRow => row !== null);
-    if (unreadable.length) await logEvent(db, 'notes_unreadable', { userId, level: 'warn', meta: { noteIds: unreadable } });
+    if (unreadable.length) {
+      await logEvent(db, 'notes_unreadable', { userId, level: 'warn', meta: { noteIds: unreadable } });
+      // Returning nextCursor here would permanently skip these rows even if their
+      // Drive files later become readable without another metadata update.
+      throw httpError('note_content_unavailable', 409);
+    }
 
     return c.json({ rows, cursor, nextCursor, hasMore, skipped: unreadable.length });
   });
