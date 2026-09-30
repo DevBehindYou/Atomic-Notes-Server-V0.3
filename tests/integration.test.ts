@@ -379,6 +379,41 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal(fourth.rows[0].body, 'Keep body');
   });
 
+  await t.test('R5 recreated notes advance beyond pre-wipe versions and reject stale edits', async () => {
+    const account = await user(), note = row();
+    let version = 0;
+    for (let edit = 1; edit <= 5; edit++) {
+      await refill(account.id);
+      const response = await push([{ ...note, title: `before wipe ${edit}`, base_version: version }], account.token);
+      assert.equal(response.status, 200);
+      version = (await json(response)).results[0].version;
+    }
+    const heldByOtherDevice = version;
+    const before = await json(await request('/notes/pull', 'GET', undefined, account.token));
+    for (let cycle = 1; cycle <= 2; cycle++) {
+      assert.equal((await request('/notes', 'DELETE', undefined, account.token)).status, 200);
+      assert.equal(await collections.notes(db).countDocuments({ userId: account.id }), 0, 'wipe must not create local-deletion tombstones');
+      const empty = await json(await request(`/notes/pull?after=${before.nextCursor}`, 'GET', undefined, account.token));
+      assert.deepEqual(empty.rows, []);
+      await refill(account.id);
+      const recreated = await push([{ ...note, title: `after wipe ${cycle}`, base_version: 0 }], account.token);
+      assert.equal(recreated.status, 200);
+      const result = (await json(recreated)).results[0];
+      assert.ok(result.version > version, `recreated version ${result.version} must exceed cached version ${version}`);
+      const pulled = await json(await request(`/notes/pull?after=${empty.nextCursor}`, 'GET', undefined, account.token));
+      assert.equal(pulled.rows[0].version, result.version);
+      assert.equal(pulled.rows[0].title, `after wipe ${cycle}`);
+      assert.ok(pulled.nextCursor > empty.nextCursor);
+      version = result.version;
+      await refill(account.id);
+      const beforeWrites = writes;
+      const stale = await push([{ ...note, title: 'stale device', base_version: heldByOtherDevice }], account.token);
+      assert.equal(stale.status, 502);
+      assert.equal((await json(stale)).results[0].error, 'note_conflict');
+      assert.equal(writes, beforeWrites);
+    }
+  });
+
   await t.test('concurrent creates cannot exceed the note quota', async () => {
     const account = await user();
     await collections.atomicUsers(db).updateOne({ _id: account.id }, { $set: { noteLimit: 1 } });
