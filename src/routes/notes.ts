@@ -436,6 +436,15 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
           // lets every device keep it in a Recycle Bin and restore the real note, not an empty one.
           const raw = await getNoteFileContent(accessToken, refreshToken, m.driveFileId);
           const content = migrateAtomicFile(raw);
+          // Drive can change before the metadata transaction commits (or remain
+          // changed after a failed commit). Never label that content with the old
+          // metadata version or advance the caller past it. Legacy rows without a
+          // fingerprint retain compatibility, with identity/flag checks only.
+          if (content.id !== m._id || content.kind !== m.kind ||
+              content.pinned !== m.pinned || content.encV !== m.encV ||
+              (m.contentHash && noteContentHash({ ...content, enc_v: content.encV }) !== m.contentHash)) {
+            throw httpError('note_content_mismatch', 409);
+          }
           return toWireRow(m, { title: content.title, body: content.body, items: content.items, payload: content.payload });
         } catch (error) {
           // A file deleted or corrupted in Drive must not block every other note. Transient Google or
