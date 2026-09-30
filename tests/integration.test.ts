@@ -613,17 +613,17 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     });
   }
 
-  await t.test('files and folders deleted in Drive: pull skips them, push recreates them, wipe tolerates them', async () => {
+  await t.test('files and folders deleted in Drive: pull refuses live omissions, push recreates them, wipe tolerates them', async () => {
     const account = await user(), a = row({ title: 'A' }), b = row({ title: 'B' });
     assert.equal((await push([a, b], account.token)).status, 200);
     const meta = async (id: string) => (await collections.notes(db).findOne({ _id: id }))!;
     const oldFileOfA = (await meta(a.id)).driveFileId;
     missingFiles.add(oldFileOfA);
 
-    // One permanently deleted file must not stop the account from syncing.
-    const pulled = await json(await request('/notes/pull', 'GET', undefined, account.token));
-    assert.deepEqual(pulled.rows.map((r: any) => r.id), [b.id]);
-    assert.equal(pulled.skipped, 1);
+    // Pull refuses an incomplete page; a later push can still recreate the missing file.
+    const pulled = await request('/notes/pull', 'GET', undefined, account.token);
+    assert.equal(pulled.status, 409);
+    assert.deepEqual(await json(pulled), { error: 'note_content_unavailable' });
     assert.equal(await collections.logs(db).countDocuments({ userId: account.id, event: 'notes_unreadable' }), 1);
 
     // The next edit writes the note to a new file and records it.
