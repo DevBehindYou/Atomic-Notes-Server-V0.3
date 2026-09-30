@@ -510,6 +510,7 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal((await collections.googleAccounts(db).findOne({ userId: account.id }))!.driveRootFolderId, 'recreated-folder');
     assert.equal(await collections.logs(db).countDocuments({ userId: account.id, event: 'drive_folder_recreated' }), 1);
 
+    const preWipeVersion = (await meta(c.id)).localVersion;
     // Wiping an account must not fail because some files are already gone.
     missingFiles.add((await meta(b.id)).driveFileId);
     const wiped = await request('/notes', 'DELETE', undefined, account.token);
@@ -521,9 +522,11 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.deepEqual(afterWipe.rows, []);
     // The account keeps working: a device that still holds a note writes it again with its old version.
     await refill(account.id);
-    const restored = await push([{ ...c, base_version: 1 }], account.token);
+    const restored = await push([{ ...c, base_version: preWipeVersion }], account.token);
     assert.equal(restored.status, 200);
-    assert.equal((await collections.notes(db).findOne({ _id: c.id }))!.localVersion, 1);
+    const restoredVersion = (await json(restored)).results[0].version;
+    assert.ok(restoredVersion > preWipeVersion);
+    assert.equal((await meta(c.id)).localVersion, restoredVersion);
   });
 
   await t.test('round trips: one-note sync operations stay within a small database command budget', async () => {
