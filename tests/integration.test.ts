@@ -379,6 +379,41 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal(fourth.rows[0].body, 'Keep body');
   });
 
+  await t.test('R5 recreated notes advance beyond pre-wipe versions and reject stale edits', async () => {
+    const account = await user(), note = row();
+    let version = 0;
+    for (let edit = 1; edit <= 5; edit++) {
+      await refill(account.id);
+      const response = await push([{ ...note, title: `before wipe ${edit}`, base_version: version }], account.token);
+      assert.equal(response.status, 200);
+      version = (await json(response)).results[0].version;
+    }
+    const heldByOtherDevice = version;
+    const before = await json(await request('/notes/pull', 'GET', undefined, account.token));
+    for (let cycle = 1; cycle <= 2; cycle++) {
+      assert.equal((await request('/notes', 'DELETE', undefined, account.token)).status, 200);
+      assert.equal(await collections.notes(db).countDocuments({ userId: account.id }), 0, 'wipe must not create local-deletion tombstones');
+      const empty = await json(await request(`/notes/pull?after=${before.nextCursor}`, 'GET', undefined, account.token));
+      assert.deepEqual(empty.rows, []);
+      await refill(account.id);
+      const recreated = await push([{ ...note, title: `after wipe ${cycle}`, base_version: 0 }], account.token);
+      assert.equal(recreated.status, 200);
+      const result = (await json(recreated)).results[0];
+      assert.ok(result.version > version, `recreated version ${result.version} must exceed cached version ${version}`);
+      const pulled = await json(await request(`/notes/pull?after=${empty.nextCursor}`, 'GET', undefined, account.token));
+      assert.equal(pulled.rows[0].version, result.version);
+      assert.equal(pulled.rows[0].title, `after wipe ${cycle}`);
+      assert.ok(pulled.nextCursor > empty.nextCursor);
+      version = result.version;
+      await refill(account.id);
+      const beforeWrites = writes;
+      const stale = await push([{ ...note, title: 'stale device', base_version: heldByOtherDevice }], account.token);
+      assert.equal(stale.status, 502);
+      assert.equal((await json(stale)).results[0].error, 'note_conflict');
+      assert.equal(writes, beforeWrites);
+    }
+  });
+
   await t.test('concurrent creates cannot exceed the note quota', async () => {
     const account = await user();
     await collections.atomicUsers(db).updateOne({ _id: account.id }, { $set: { noteLimit: 1 } });
@@ -475,6 +510,7 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal((await collections.googleAccounts(db).findOne({ userId: account.id }))!.driveRootFolderId, 'recreated-folder');
     assert.equal(await collections.logs(db).countDocuments({ userId: account.id, event: 'drive_folder_recreated' }), 1);
 
+    const preWipeVersion = (await meta(c.id)).localVersion;
     // Wiping an account must not fail because some files are already gone.
     missingFiles.add((await meta(b.id)).driveFileId);
     const wiped = await request('/notes', 'DELETE', undefined, account.token);
@@ -486,9 +522,11 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.deepEqual(afterWipe.rows, []);
     // The account keeps working: a device that still holds a note writes it again with its old version.
     await refill(account.id);
-    const restored = await push([{ ...c, base_version: 1 }], account.token);
+    const restored = await push([{ ...c, base_version: preWipeVersion }], account.token);
     assert.equal(restored.status, 200);
-    assert.equal((await collections.notes(db).findOne({ _id: c.id }))!.localVersion, 1);
+    const restoredVersion = (await json(restored)).results[0].version;
+    assert.ok(restoredVersion > preWipeVersion);
+    assert.equal((await meta(c.id)).localVersion, restoredVersion);
   });
 
   await t.test('round trips: one-note sync operations stay within a small database command budget', async () => {
@@ -674,13 +712,15 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
 
   await t.test('R12 only successful deletions supply capacity in a partially failing replacement batch', async () => {
     const account = await user(), a = row({ title: 'DELETE_FAIL' }), b = row();
-    assert.equal((await push([a, b], account.token)).status, 200);
+    const initial = await push([a, b], account.token);
+    assert.equal(initial.status, 200);
+    const versions = new Map<string, number>((await json(initial)).results.map((r: any) => [r.id, r.version]));
     await refill(account.id);
     await collections.atomicUsers(db).updateOne({ _id: account.id }, { $set: { noteLimit: 2 } });
     const c = row(), d = row();
     failTitle = 'DELETE_FAIL';
     try {
-      const response = await push([c, d, { ...a, deleted: true, base_version: 1 }, { ...b, deleted: true, base_version: 1 }], account.token);
+      const response = await push([c, d, { ...a, deleted: true, base_version: versions.get(a.id) }, { ...b, deleted: true, base_version: versions.get(b.id) }], account.token);
       assert.equal(response.status, 502);
       const body = await json(response);
       assert.equal(await collections.notes(db).countDocuments({ userId: account.id, deleted: false }), 2);
@@ -701,7 +741,7 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     await collections.atomicUsers(db).updateOne({ _id: account.id }, { $set: { noteLimit: 1 } });
     failDelete = true;
     try {
-      const response = await push([{ ...deleted, title: 'RESTORED', deleted: false, base_version: 1 }, { ...active, deleted: true, base_version: 1 }], account.token);
+      const response = await push([{ ...deleted, title: 'RESTORED', deleted: false, base_version: tombstone.localVersion }, { ...active, deleted: true, base_version: 1 }], account.token);
       assert.equal(response.status, 502);
       assert.equal(await collections.notes(db).countDocuments({ userId: account.id, deleted: false }), 1);
       assert.equal((await collections.notes(db).findOne({ _id: deleted.id }))!.deleted, true);

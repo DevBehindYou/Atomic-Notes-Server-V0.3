@@ -17,7 +17,9 @@ export async function saveNoteMetadata(db: Db, userId: string, id: string, field
     const syncSequence = counter!.value;
     let saved: NoteDoc;
     if (fresh) {
-      saved = { ...fresh, ...fields, syncSequence };
+      // The per-user sequence survives cloud wipe. Starting a new incarnation at
+      // that sequence keeps its version newer than any pre-wipe cached copy.
+      saved = { ...fresh, ...fields, syncSequence, localVersion: syncSequence };
       await collections.notes(db).insertOne(saved, { session });
     } else {
       // The write returns the stored document, so no second read is needed.
@@ -78,7 +80,9 @@ export async function saveNoteMetadataBatch(
     entries.forEach((entry, i) => {
       const syncSequence = firstSeq + i;
       if (entry.fresh) {
-        const doc: NoteDoc = { ...entry.fresh, ...entry.fields, syncSequence };
+        // Fresh notes may reuse an ID removed by a cloud wipe. The retained
+        // sequence prevents version regression without storing a tombstone.
+        const doc: NoteDoc = { ...entry.fresh, ...entry.fields, syncSequence, localVersion: syncSequence };
         saved.set(entry.id, doc);
         ops.push({ insertOne: { document: doc } });
       } else {
