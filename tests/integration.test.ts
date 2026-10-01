@@ -1266,6 +1266,32 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
       assert.equal(await collections.coinOperations(db).countDocuments({ userId: zero.id, requestId: clampedId }), 1);
       await reconcile(zero.id);
     });
+    await ct.test('batch pagination is stable across timestamp ties and reconciliation is read-only', async () => {
+      const account = await user();
+      const at = new Date();
+      await withTransaction(async (session) => {
+        await collections.coinLots(db).insertMany(Array.from({ length: 55 }, () => {
+          const id = randomUUID(); return { _id: id, userId: account.id, source: 'controller' as const,
+            creditedAt: at, expiresAt: coinExpiry(at), amount: 1, remaining: 1, operationId: id };
+        }), { session });
+        await collections.atomicUsers(db).updateOne({ _id: account.id }, { $inc: { coins: 55 } }, { session });
+      });
+      const first = await json(await request('/energy/coins', 'GET', undefined, account.token));
+      assert.equal(first.rows.length, 50); assert.ok(first.next_cursor);
+      const second = await json(await request(`/energy/coins?cursor=${first.next_cursor}`, 'GET', undefined, account.token));
+      assert.equal(second.rows.length, 6); assert.equal(second.next_cursor, null);
+      assert.equal(new Set([...first.rows, ...second.rows].map((row: { id: string }) => row.id)).size, 56);
+      const { auditCoinBalances } = await import('../src/lib/coinLots');
+      const before = await collections.energyLedger(db).countDocuments({});
+      const report = await auditCoinBalances(db);
+      assert.equal(report.mismatchedWallets, 0); assert.equal(report.invalidLots, 0);
+      assert.equal(await collections.energyLedger(db).countDocuments({}), before);
+      const index = await collections.coinLots(db).find({ userId: account.id }).sort({ creditedAt: -1, _id: -1 }).limit(51).explain('executionStats');
+      assert.ok(index.executionStats.totalDocsExamined <= 51);
+      assert.equal((await request(`/admin/coins?user_id=${account.id}`)).status, 401);
+      const adminPage = await json(await request(`/admin/coins?user_id=${account.id}`, 'GET', undefined, undefined, 'test-admin-key'));
+      assert.equal(adminPage.rows.length, 50);
+    });
     await ct.test('grant racing expiry, current reads, and rollback of configuration preserve batch authority', async () => {
       const account = await user();
       await collections.coinLots(db).updateMany({ userId: account.id }, { $set: { expiresAt: new Date(Date.now() - 1) } });

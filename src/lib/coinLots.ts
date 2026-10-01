@@ -142,3 +142,21 @@ export async function coinDetails(db: Db, userId: string, before?: { at: Date; i
       next_cursor: rows.length > 50 ? Buffer.from(JSON.stringify({ at: last.creditedAt.toISOString(), id: last._id })).toString('base64url') : null };
   });
 }
+
+/** Read-only reconciliation. Includes due-but-unsettled lots in the stored-summary invariant. */
+export async function auditCoinBalances(db: Db) {
+  const wallets = await collections.atomicUsers(db).aggregate<{ wallets: number; mismatches: number }>([
+    { $match: { coinLotsVersion: 1 } },
+    { $lookup: { from: 'coin_lots', let: { id: '$_id' }, pipeline: [
+      { $match: { $expr: { $eq: ['$userId', '$$id'] } } },
+      { $group: { _id: null, remaining: { $sum: '$remaining' } } },
+    ], as: 'lots' } },
+    { $group: { _id: null, wallets: { $sum: 1 }, mismatches: { $sum: { $cond: [
+      { $ne: ['$coins', { $ifNull: [{ $arrayElemAt: ['$lots.remaining', 0] }, 0] }] }, 1, 0,
+    ] } } } },
+  ]).toArray();
+  const invalidLots = await collections.coinLots(db).countDocuments({ $expr: { $or: [
+    { $lt: ['$remaining', 0] }, { $gt: ['$remaining', '$amount'] }, { $lt: ['$amount', 0] },
+  ] } });
+  return { migratedWallets: wallets[0]?.wallets ?? 0, mismatchedWallets: wallets[0]?.mismatches ?? 0, invalidLots };
+}
