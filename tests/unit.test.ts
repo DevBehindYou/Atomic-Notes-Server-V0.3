@@ -263,3 +263,31 @@ test('the welcome notifications have fixed, unique ids and point where the App c
     assert.equal(/patreon|ko-?fi|paypal|buy ?me ?a ?coffee/i.test(`${n.subject} ${n.description} ${n.action ?? ''}`), false, n.subject);
   }
 });
+
+// New-policy contract tests; these are additions, not claims of a pre-existing bug fix.
+import { coinExpiry, coinPolicyActivation } from '../src/lib/coinPolicy';
+test('coin expiry uses six UTC calendar months, clamped, retaining milliseconds', () => {
+  for (const [start, end] of [
+    ['2026-08-30T23:59:59.123Z', '2027-02-28T23:59:59.123Z'],
+    ['2026-09-15T00:00:00.000Z', '2027-03-15T00:00:00.000Z'],
+    ['2027-08-31T12:34:56.789Z', '2028-02-29T12:34:56.789Z'],
+    ['2026-12-31T00:00:00.000Z', '2027-06-30T00:00:00.000Z'],
+  ]) assert.equal(coinExpiry(new Date(start)).toISOString(), end);
+});
+test('coin policy is inactive by default and requires an unambiguous activation instant', () => {
+  const previous = process.env.COIN_EXPIRY_ACTIVATED_AT;
+  try {
+    delete process.env.COIN_EXPIRY_ACTIVATED_AT;
+    assert.equal(coinPolicyActivation(), null);
+    process.env.COIN_EXPIRY_ACTIVATED_AT = '2026-10-01T00:00:00.000Z';
+    assert.equal(coinPolicyActivation(new Date('2026-09-30T23:59:59.999Z')), null);
+    assert.equal(coinPolicyActivation(new Date('2026-10-01T00:00:00.000Z'))?.toISOString(), '2026-10-01T00:00:00.000Z');
+    for (const bad of ['tomorrow', '2026-10-01', '2026-02-30T00:00:00.000Z']) {
+      process.env.COIN_EXPIRY_ACTIVATED_AT = bad;
+      assert.throws(() => coinPolicyActivation(), /Invalid COIN_EXPIRY_ACTIVATED_AT/);
+    }
+  } finally {
+    if (previous === undefined) delete process.env.COIN_EXPIRY_ACTIVATED_AT;
+    else process.env.COIN_EXPIRY_ACTIVATED_AT = previous;
+  }
+});

@@ -16,6 +16,7 @@ if (!uri || !(localReplicaSet || atlasTempDb)) {
 // Atlas limits database names to 38 bytes.
 const databaseName = `atomic_test_${randomUUID().replaceAll('-', '').slice(0, 20)}`;
 process.env.MONGODB_DB_NAME = databaseName;
+delete process.env.COIN_EXPIRY_ACTIVATED_AT; // Existing contract/budget fixtures exercise staged, inactive policy.
 process.env.ADMIN_API_KEY = 'test-admin-key';
 process.env.TOKEN_ENCRYPTION_KEY = Buffer.alloc(32, 3).toString('base64');
 
@@ -1151,4 +1152,175 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal((await json(await epoch())).revoked_before, first);
     assert.equal((await request('/admin/controller/session-epoch')).status, 401);
   });
+  await t.test('coin batches: migration, new grants, FEFO, replay, expiry and concurrent spending', async (ct) => {
+    const { readCoinWallet, prepareCoinWallet, coinDetails } = await import('../src/lib/coinLots');
+    const { coinExpiry } = await import('../src/lib/coinPolicy');
+    const { energyUpgradeNoteLimit } = await import('../src/lib/energy');
+    const legacy = await user();
+    await collections.atomicUsers(db).updateOne({ _id: legacy.id }, { $set: { coins: 40 } });
+    const zero = await user();
+    await collections.atomicUsers(db).updateOne({ _id: zero.id }, { $set: { coins: 0 } });
+    const priorLedger = await collections.energyLedger(db).countDocuments({ userId: legacy.id });
+    process.env.COIN_EXPIRY_ACTIVATED_AT = '2026-01-01T00:00:00.000Z';
+    ct.after(() => { delete process.env.COIN_EXPIRY_ACTIVATED_AT; });
+    const lots = (id: string) => collections.coinLots(db).find({ userId: id }).sort({ creditedAt: 1, _id: 1 }).toArray();
+    const wallet = (id: string) => collections.atomicUsers(db).findOne({ _id: id }).then((w) => w!);
+    const adjust = (id: string, coins: number, requestId = randomUUID(), energy = 0) => request('/admin/energy', 'POST',
+      { user_id: id, coins_delta: coins, energy_delta: energy, request_id: requestId }, undefined, 'test-admin-key');
+    const reconcile = async (id: string) => {
+      const records = await lots(id);
+      assert.equal((await wallet(id)).coins, records.reduce((n, l) => n + l.remaining, 0));
+      assert.ok(records.every((l) => l.remaining >= 0 && l.remaining <= l.amount));
+    };
+    await ct.test('concurrent first access preserves exact legacy balance without a fabricated credit', async () => {
+      await Promise.all([readCoinWallet(db, legacy.id), readCoinWallet(db, legacy.id)]);
+      assert.equal((await lots(legacy.id)).length, 1);
+      assert.equal((await lots(legacy.id))[0].source, 'legacy');
+      assert.equal((await lots(legacy.id))[0].expiresAt, null);
+      assert.equal((await lots(legacy.id))[0].remaining, 40);
+      assert.equal(await collections.energyLedger(db).countDocuments({ userId: legacy.id }), priorLedger);
+      await readCoinWallet(db, zero.id);
+      assert.equal((await lots(zero.id)).length, 0);
+      assert.equal((await wallet(zero.id)).coinLotsVersion, 1);
+      await reconcile(legacy.id);
+    });
+    await ct.test('new welcome coins expire, while duplicate grants have only one batch', async () => {
+      const fresh = await user();
+      const gift = (await lots(fresh.id))[0];
+      assert.equal(gift.source, 'welcome');
+      assert.equal(gift.remaining, 5);
+      assert.equal(gift.expiresAt!.toISOString(), coinExpiry(gift.creditedAt).toISOString());
+      const id = randomUUID();
+      const results = await Promise.all([adjust(legacy.id, 50, id), adjust(legacy.id, 50, id)]);
+      assert.deepEqual(results.map((r) => r.status), [200, 200]);
+      assert.equal((await wallet(legacy.id)).coins, 90);
+      assert.equal((await lots(legacy.id)).length, 2);
+      assert.equal(await collections.coinOperations(db).countDocuments({ userId: legacy.id, requestId: id }), 1);
+      assert.equal((await adjust(legacy.id, 49, id)).status, 409);
+      const first = (await lots(legacy.id)).find((l) => l.source === 'controller')!;
+      assert.equal(first.expiresAt!.toISOString(), coinExpiry(first.creditedAt).toISOString());
+      assert.equal((await adjust(legacy.id, 50)).status, 200);
+      assert.equal((await collections.coinLots(db).findOne({ _id: first._id }))!.expiresAt!.getTime(), first.expiresAt!.getTime());
+      await reconcile(legacy.id);
+    });
+    await ct.test('spending consumes earliest expiry then legacy; conversion replay cannot charge again', async () => {
+      const grants = (await lots(legacy.id)).filter((l) => l.source === 'controller');
+      // Fixture-only dates: keep both unexpired and make the second credit expire first.
+      await collections.coinLots(db).updateOne({ _id: grants[0]._id }, { $set: { expiresAt: new Date(Date.now() + 86400000 * 60) } });
+      await collections.coinLots(db).updateOne({ _id: grants[1]._id }, { $set: { expiresAt: new Date(Date.now() + 86400000 * 30) } });
+      const id = randomUUID();
+      await Promise.all([energyConvert(db, legacy.id, 1, id), energyConvert(db, legacy.id, 1, id)]);
+      assert.equal((await wallet(legacy.id)).energy, 40);
+      assert.equal((await collections.coinLots(db).findOne({ _id: grants[1]._id }))!.remaining, 49);
+      assert.equal((await collections.coinLots(db).findOne({ _id: grants[0]._id }))!.remaining, 50);
+      assert.equal((await collections.coinLots(db).findOne({ _id: `${legacy.id}:opening` }))!.remaining, 40);
+      await assert.rejects(energyConvert(db, legacy.id, 2, id), /coin_request_mismatch/);
+      await assert.rejects(energyConvert(db, legacy.id, 1), /coin_request_id_required/);
+      const count = await collections.coinOperations(db).countDocuments({ userId: legacy.id });
+      await assert.rejects(energyConvert(db, legacy.id, 3, randomUUID()), /energy_cap_exceeded/);
+      assert.equal(await collections.coinOperations(db).countDocuments({ userId: legacy.id }), count);
+      // Capacity's existing from_limit guard remains safe even across different request IDs.
+      await Promise.all([energyUpgradeNoteLimit(db, legacy.id, 30, randomUUID()), energyUpgradeNoteLimit(db, legacy.id, 30, randomUUID())]);
+      assert.equal((await wallet(legacy.id)).noteLimit, 40);
+      assert.equal((await collections.coinLots(db).findOne({ _id: grants[1]._id }))!.remaining, 39);
+      assert.equal((await adjust(legacy.id, -100)).status, 200);
+      assert.equal((await collections.coinLots(db).findOne({ _id: `${legacy.id}:opening` }))!.remaining, 29);
+      await reconcile(legacy.id);
+    });
+    await ct.test('exact expiry expires only unspent remainder once; energy and capacity stay intact', async () => {
+      const account = await user();
+      const gift = (await lots(account.id))[0];
+      await energyConvert(db, account.id, 1, randomUUID());
+      const at = gift.expiresAt!;
+      await withTransaction(async (session) => {
+        const current = (await collections.atomicUsers(db).findOne({ _id: account.id }, { session }))!;
+        const before = await prepareCoinWallet(db, current, session, new Date(at.getTime() - 1));
+        assert.equal(before.coins, 4);
+        const expired = await prepareCoinWallet(db, before, session, at);
+        assert.equal(expired.coins, 0);
+      });
+      await withTransaction(async (session) => {
+        const current = (await collections.atomicUsers(db).findOne({ _id: account.id }, { session }))!;
+        await prepareCoinWallet(db, current, session, at);
+      });
+      assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id, reason: 'coin_expired' }), 1);
+      assert.equal((await wallet(account.id)).energy, 40);
+      assert.equal((await wallet(account.id)).noteLimit, 30);
+      await reconcile(account.id);
+    });
+    await ct.test('parallel spends cannot use one coin twice; expired balances never authorize spending', async () => {
+      assert.equal((await adjust(zero.id, 1)).status, 200);
+      const outcomes = await Promise.allSettled([energyConvert(db, zero.id, 1, randomUUID()), energyConvert(db, zero.id, 1, randomUUID())]);
+      assert.equal(outcomes.filter((r) => r.status === 'fulfilled').length, 1);
+      assert.equal((await wallet(zero.id)).coins, 0);
+      assert.equal((await wallet(zero.id)).energy, 40);
+      assert.equal((await adjust(zero.id, 7)).status, 200);
+      await collections.coinLots(db).updateMany({ userId: zero.id, remaining: { $gt: 0 } }, { $set: { expiresAt: new Date(Date.now() - 1) } });
+      await assert.rejects(energyConvert(db, zero.id, 1, randomUUID()), /insufficient_coins/);
+      assert.equal((await wallet(zero.id)).coins, 0, 'read-time expiry commits even when the later spend fails');
+      const missingId = await request('/admin/energy', 'POST', { user_id: zero.id, coins_delta: 2 }, undefined, 'test-admin-key');
+      assert.equal(missingId.status, 409);
+      const clampedId = randomUUID();
+      const clamped = await Promise.all([adjust(zero.id, -100, clampedId), adjust(zero.id, -100, clampedId)]);
+      assert.deepEqual(clamped.map((r) => r.status), [200, 200], 'zero-effect adjustments are also replay-safe');
+      assert.equal(await collections.coinOperations(db).countDocuments({ userId: zero.id, requestId: clampedId }), 1);
+      await reconcile(zero.id);
+    });
+    await ct.test('batch pagination is stable across timestamp ties and reconciliation is read-only', async () => {
+      const account = await user();
+      const at = new Date();
+      await withTransaction(async (session) => {
+        await collections.coinLots(db).insertMany(Array.from({ length: 55 }, () => {
+          const id = randomUUID(); return { _id: id, userId: account.id, source: 'controller' as const,
+            creditedAt: at, expiresAt: coinExpiry(at), amount: 1, remaining: 1, operationId: id };
+        }), { session });
+        await collections.atomicUsers(db).updateOne({ _id: account.id }, { $inc: { coins: 55 } }, { session });
+      });
+      const first = await json(await request('/energy/coins', 'GET', undefined, account.token));
+      assert.equal(first.rows.length, 50); assert.ok(first.next_cursor);
+      const second = await json(await request(`/energy/coins?cursor=${first.next_cursor}`, 'GET', undefined, account.token));
+      assert.equal(second.rows.length, 6); assert.equal(second.next_cursor, null);
+      assert.equal(new Set([...first.rows, ...second.rows].map((row: { id: string }) => row.id)).size, 56);
+      const { auditCoinBalances } = await import('../src/lib/coinLots');
+      const before = await collections.energyLedger(db).countDocuments({});
+      const report = await auditCoinBalances(db);
+      assert.equal(report.mismatchedWallets, 0); assert.equal(report.invalidLots, 0);
+      assert.equal(await collections.energyLedger(db).countDocuments({}), before);
+      const index = await collections.coinLots(db).find({ userId: account.id }).sort({ creditedAt: -1, _id: -1 }).limit(51).explain('executionStats');
+      assert.ok(index.executionStats.totalDocsExamined <= 51);
+      assert.equal((await request(`/admin/coins?user_id=${account.id}`)).status, 401);
+      const adminPage = await json(await request(`/admin/coins?user_id=${account.id}`, 'GET', undefined, undefined, 'test-admin-key'));
+      assert.equal(adminPage.rows.length, 50);
+    });
+    await ct.test('grant racing expiry, current reads, and rollback of configuration preserve batch authority', async () => {
+      const account = await user();
+      await collections.coinLots(db).updateMany({ userId: account.id }, { $set: { expiresAt: new Date(Date.now() - 1) } });
+      const outcomes = await Promise.all([readCoinWallet(db, account.id), adjust(account.id, 9)]);
+      assert.equal((outcomes[1] as Response).status, 200);
+      assert.equal((await wallet(account.id)).coins, 9);
+      assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id, reason: 'coin_expired' }), 1);
+      const details = await json(await request('/energy/coins', 'GET', undefined, account.token));
+      assert.equal(details.coins, 9); assert.equal(details.non_expiring_coins, 0); assert.equal(details.next_expiry_coins, 9);
+      assert.equal(details.rows.length, 2);
+      const accountEmail = (await collections.users(db).findOne({ _id: account.id }))!.email;
+      const lookup = await json(await request(`/admin/user?email=${encodeURIComponent(accountEmail)}`, 'GET', undefined, undefined, 'test-admin-key'));
+      assert.equal(lookup.coins, lookup.coin_details.coins);
+      assert.equal(lookup.coins, 9);
+      assert.equal((await request('/energy/coins')).status, 401);
+      assert.equal((await request('/energy/coins?cursor=bad', 'GET', undefined, account.token)).status, 400);
+      const other = await user();
+      const isolated = await coinDetails(db, other.id);
+      assert.equal(isolated!.rows.length, 1);
+      assert.notEqual(isolated!.rows[0].id, details.rows[0].id);
+      delete process.env.COIN_EXPIRY_ACTIVATED_AT;
+      assert.equal((await adjust(account.id, 2)).status, 200);
+      assert.equal((await lots(account.id)).filter((l) => l.source === 'controller').length, 2);
+      assert.equal((await wallet(account.id)).coins, 11);
+      await reconcile(account.id);
+    });
+    for (const collection of [collections.coinLots(db), collections.coinOperations(db)]) {
+      assert.ok((await collection.listIndexes().toArray()).every((index) => index.expireAfterSeconds === undefined));
+    }
+  });
+
 });

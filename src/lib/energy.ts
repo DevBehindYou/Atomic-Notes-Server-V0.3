@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Db } from 'mongodb';
 import { collections, type AtomicUserDoc } from '../db/collections.js';
 import { withTransaction } from '../db/mongo.js';
+import { coinOperationId, coinFingerprint, prepareCoinWallet, readCoinWallet, recordCoinOperation, replayCoinOperation, requireCoinRequestId, spendCoinLots } from './coinLots.js';
 
 /**
  * Ported from the real Postgres SQL (supabase/migrations/006_energy.sql,
@@ -72,7 +73,7 @@ export class EnergyError extends Error {
 
 async function getOrInitWallet(db: Db, userId: string): Promise<AtomicUserDoc> {
   const col = collections.atomicUsers(db);
-  const existing = await col.findOne({ _id: userId });
+  const existing = await readCoinWallet(db, userId);
   if (existing) return existing;
 
   const fresh: AtomicUserDoc = {
@@ -96,6 +97,7 @@ async function getOrInitWallet(db: Db, userId: string): Promise<AtomicUserDoc> {
   await withTransaction(async (session) => {
     const result = await col.updateOne({ _id: userId }, { $setOnInsert: fresh }, { upsert: true, session });
     if (result.upsertedCount > 0) {
+      await prepareCoinWallet(db, fresh, session, new Date(), true);
       await writeLedger(db, session, {
         userId,
         kind: 'admin_adjust',
@@ -108,7 +110,7 @@ async function getOrInitWallet(db: Db, userId: string): Promise<AtomicUserDoc> {
     }
   });
 
-  return (await col.findOne({ _id: userId }))!;
+  return (await readCoinWallet(db, userId))!;
 }
 
 /** The wallet, created with its welcome gift if missing. One read when it already exists. */
@@ -142,6 +144,8 @@ async function writeLedger(
     resultingCoins: number;
     resultingEnergy: number;
     note: string | null;
+    coinOperationId?: string;
+    lotIds?: string[];
   },
 ) {
   await collections.energyLedger(db).insertOne(
@@ -197,14 +201,18 @@ export async function energyGrantDaily(db: Db, userId: string): Promise<void> {
 }
 
 /** energy_convert — coins -> energy at 40:1. Hard-rejects if it would exceed the cap. */
-export async function energyConvert(db: Db, userId: string, coins: number): Promise<void> {
-  if (!Number.isInteger(coins) || coins <= 0) throw new EnergyError('invalid_amount');
+export async function energyConvert(db: Db, userId: string, coins: number, requestId?: string): Promise<void> {
+  if (!Number.isSafeInteger(coins) || coins <= 0) throw new EnergyError('invalid_amount');
   await getOrInitWallet(db, userId);
 
   await withTransaction(async (session) => {
     const col = collections.atomicUsers(db);
-    const wallet = await col.findOne({ _id: userId }, { session });
-    if (!wallet) throw new EnergyError('invalid_amount');
+    const fingerprint = coinFingerprint('convert', [coins]);
+    if (await replayCoinOperation(db, userId, requestId, fingerprint, session)) return;
+    const current = await col.findOne({ _id: userId }, { session });
+    if (!current) throw new EnergyError('invalid_amount');
+    const wallet = await prepareCoinWallet(db, current, session);
+    requireCoinRequestId(wallet, requestId);
 
     if (wallet.coins < coins) throw new EnergyError('insufficient_coins');
     const energyGain = coins * ENERGY.coinToEnergy;
@@ -217,9 +225,12 @@ export async function energyConvert(db: Db, userId: string, coins: number): Prom
     );
     if (!updated) throw new EnergyError('insufficient_coins');
 
+    const allocations = await spendCoinLots(db, wallet, coins, session);
+    await recordCoinOperation(db, updated, requestId, fingerprint, allocations, session);
     await writeLedger(db, session, {
       userId,
       kind: 'convert',
+      ...(requestId ? { coinOperationId: coinOperationId(userId, requestId), lotIds: allocations.map((a) => a.lotId) } : {}),
       coinsDelta: -coins,
       energyDelta: energyGain,
       resultingCoins: updated.coins,
@@ -234,14 +245,20 @@ export async function energyConvert(db: Db, userId: string, coins: number): Prom
  * safe to repeat: when the limit has already moved past it, the purchase went through and the wallet is
  * returned unchanged instead of charging a second time.
  */
-export async function energyUpgradeNoteLimit(db: Db, userId: string, fromLimit: number): Promise<AtomicUserDoc> {
+export async function energyUpgradeNoteLimit(db: Db, userId: string, fromLimit: number, requestId?: string): Promise<AtomicUserDoc> {
   if (!Number.isInteger(fromLimit) || fromLimit < 0) throw new EnergyError('invalid_amount');
   await getOrInitWallet(db, userId);
 
   return withTransaction(async (session) => {
     const col = collections.atomicUsers(db);
-    const wallet = (await col.findOne({ _id: userId }, { session }))!;
-    if (wallet.noteLimit > fromLimit) return wallet;
+    const fingerprint = coinFingerprint('capacity', [fromLimit]);
+    const replay = await replayCoinOperation(db, userId, requestId, fingerprint, session);
+    if (replay) return replay;
+    const wallet = await prepareCoinWallet(db, (await col.findOne({ _id: userId }, { session }))!, session);
+    if (wallet.noteLimit > fromLimit) {
+      await recordCoinOperation(db, wallet, requestId, fingerprint, [], session);
+      return wallet;
+    }
     if (wallet.noteLimit < fromLimit) throw new EnergyError('invalid_amount');
 
     const tierIndex = NOTE_LIMIT_TIERS.findIndex((t) => t.limit === wallet.noteLimit);
@@ -256,9 +273,12 @@ export async function energyUpgradeNoteLimit(db: Db, userId: string, fromLimit: 
     );
     if (!updated) throw new EnergyError('insufficient_coins');
 
+    const allocations = await spendCoinLots(db, wallet, nextTier.costCoins, session);
+    await recordCoinOperation(db, updated, requestId, fingerprint, allocations, session);
     await writeLedger(db, session, {
       userId,
       kind: 'purchase',
+      ...(requestId ? { coinOperationId: coinOperationId(userId, requestId), lotIds: allocations.map((a) => a.lotId) } : {}),
       coinsDelta: -nextTier.costCoins,
       energyDelta: 0,
       resultingCoins: updated.coins,

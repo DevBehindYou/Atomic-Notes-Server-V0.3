@@ -82,6 +82,9 @@ export const atomicUserSchema = z.object({
   _id: z.string().uuid(), // == userId
   username: z.string().default(''),
   noteLimit: z.number().int().default(30),
+  coinLotsVersion: z.literal(1).optional(),
+  coinMutationRevision: z.number().int().optional(),
+  coinPolicyActivatedAt: z.date().optional(),
   coins: z.number().int().default(5), // welcome gift, new wallets only
   energy: z.number().int().default(0),
   energyCap: z.number().int().default(120),
@@ -118,6 +121,9 @@ export const energyLedgerSchema = z.object({
   resultingCoins: z.number().int(),
   resultingEnergy: z.number().int(),
   note: z.string().nullable(),
+  reason: z.string().optional(),
+  coinOperationId: z.string().optional(),
+  lotIds: z.array(z.string()).optional(),
   createdAt: z.date(),
 });
 export type EnergyLedgerDoc = z.infer<typeof energyLedgerSchema>;
@@ -274,6 +280,17 @@ export type ControllerLoginAttemptDoc = {
 /** Small named settings, such as the Controller's session revocation time. */
 export type AdminSettingDoc = { _id: string; value: number; updatedAt: Date };
 
+/** Monetary records have no TTL: expiry removes spending power, not audit evidence. */
+export type CoinLotDoc = {
+  _id: string; userId: string; source: 'legacy' | 'welcome' | 'controller';
+  creditedAt: Date; expiresAt: Date | null; amount: number; remaining: number; operationId: string;
+};
+export type CoinAllocation = { lotId: string; amount: number };
+export type CoinOperationDoc = {
+  _id: string; userId: string; requestId: string; fingerprint: string; createdAt: Date;
+  allocations: CoinAllocation[]; result: AtomicUserDoc;
+};
+
 // ---------------------------------------------------------------------------
 // Collection getters
 // ---------------------------------------------------------------------------
@@ -281,6 +298,8 @@ export const collections = {
   users: (db: Db) => db.collection<UserDoc>('users'),
   googleAccounts: (db: Db) => db.collection<GoogleAccountDoc>('google_accounts'),
   sessions: (db: Db) => db.collection<SessionDoc>('sessions'),
+  coinLots: (db: Db) => db.collection<CoinLotDoc>('coin_lots'),
+  coinOperations: (db: Db) => db.collection<CoinOperationDoc>('coin_operations'),
   atomicUsers: (db: Db) => db.collection<AtomicUserDoc>('atomic_users'),
   energyLedger: (db: Db) => db.collection<EnergyLedgerDoc>('energy_ledger'),
   vaults: (db: Db) => db.collection<VaultDoc>('vaults'),
@@ -296,6 +315,9 @@ export const collections = {
 
 /** Call once at startup (or via a one-off script) — indexes are not auto-created. */
 export async function ensureIndexes(db: Db) {
+  await collections.coinLots(db).createIndex({ userId: 1, expiresAt: 1, creditedAt: 1, _id: 1 });
+  await collections.coinLots(db).createIndex({ userId: 1, creditedAt: -1, _id: -1 });
+  await collections.coinOperations(db).createIndex({ userId: 1, requestId: 1 }, { unique: true });
   await db.collection("sync_operations").createIndex({ userId: 1, status: 1 });
   // Records only need to outlive the retries of a request; keep them for 30 days.
   await db.collection("sync_operations").createIndex({ createdAt: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60 });

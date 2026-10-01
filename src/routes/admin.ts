@@ -1,3 +1,4 @@
+import { httpError } from '../lib/httpError.js';
 import { escapeRegex } from '../lib/validation.js';
 import { Hono } from 'hono';
 import { z } from 'zod';
@@ -9,6 +10,7 @@ import { computeControllerStats } from '../lib/adminStats.js';
 import { logEvent } from '../lib/logs.js';
 import { getEnvIssues } from '../lib/env.js';
 import { NOTE_LIMIT } from '../lib/energy.js';
+import { coinDetails, coinFingerprint, coinOperationId, creditCoinLot, prepareCoinWallet, readCoinWallet, recordCoinOperation, replayCoinOperation, requireCoinRequestId, spendCoinLots } from '../lib/coinLots.js';
 import { AUDIENCES, audienceUserIds } from '../lib/notificationFeed.js';
 import { checkLogin, controllerSessionEpoch, recordLoginFailure, recordLoginSuccess, revokeControllerSessions } from '../lib/controllerLogin.js';
 
@@ -24,9 +26,9 @@ admin.get('/health', async (c) => {
   try {
     const db = await getDb();
     await collections.notifications(db).countDocuments({});
-    return c.json({ db: true, dbError: null, configuration, time: new Date().toISOString() });
+    return c.json({ coin_request_replay: true, db: true, dbError: null, configuration, time: new Date().toISOString() });
   } catch (e) {
-    return c.json({ db: false, dbError: e instanceof Error ? e.message : 'DB error', configuration, time: new Date().toISOString() });
+    return c.json({ coin_request_replay: true, db: false, dbError: e instanceof Error ? e.message : 'DB error', configuration, time: new Date().toISOString() });
   }
 });
 
@@ -54,7 +56,7 @@ admin.get('/user', async (c) => {
   const user = await collections.users(db).findOne({ email: { $regex: `^${escapeRegex(email)}$`, $options: 'i' } });
   if (!user) return c.json({ error: 'No user with that email' }, 404);
 
-  const wallet = await collections.atomicUsers(db).findOne({ _id: user._id });
+  const wallet = await readCoinWallet(db, user._id);
   // No last_sign_in_at concept from Supabase auth.users anymore — the most
   // recent session's createdAt is the closest honest equivalent.
   const lastSession = await collections
@@ -64,6 +66,7 @@ admin.get('/user', async (c) => {
     .limit(1)
     .toArray();
 
+  const details = wallet?.coinLotsVersion === 1 ? await coinDetails(db, user._id) : null;
   return c.json({
     user_id: user._id,
     email: user.email,
@@ -72,11 +75,21 @@ admin.get('/user', async (c) => {
     last_sign_in_at: lastSession[0]?.createdAt.toISOString() ?? null,
     auth_created_at: user.createdAt.toISOString(),
     has_wallet: Boolean(wallet),
-    coins: wallet?.coins ?? 0,
+    coins: details?.enabled ? details.coins : wallet?.coins ?? 0,
+    coin_details: details,
     energy: wallet?.energy ?? 0,
     energy_cap: wallet?.energyCap ?? 120,
     last_daily_grant_at: wallet?.lastDailyGrantAt?.toISOString() ?? null,
   });
+});
+
+const coinCursorSchema = z.object({ at: z.string().datetime(), id: z.string().min(1).max(100) });
+admin.get('/coins', async (c) => {
+  const userId = z.string().uuid().parse(c.req.query('user_id'));
+  const cursor = c.req.query('cursor');
+  if (cursor && cursor.length > 512) return c.json({ error: 'invalid_cursor' }, 400);
+  const decoded = cursor ? coinCursorSchema.parse(JSON.parse(Buffer.from(cursor, 'base64url').toString())) : null;
+  return c.json(await coinDetails(await getDb(), userId, decoded ? { at: new Date(decoded.at), id: decoded.id } : undefined));
 });
 
 // ---------------------------------------------------------------------------
@@ -93,6 +106,7 @@ const adjustSchema = z
   .object({
     email: z.string().email().optional(),
     user_id: z.string().uuid().optional(),
+    request_id: z.string().uuid().optional(),
     coins_delta: adjustDelta,
     energy_delta: adjustDelta,
     note: z.string().max(120).optional(),
@@ -118,11 +132,23 @@ admin.post('/energy', async (c) => {
 
   const result = await withTransaction(async (session) => {
     const col = collections.atomicUsers(db);
-    const wallet = await col.findOne({ _id: userId }, { session });
+    const now = new Date();
+    const fingerprint = coinFingerprint('adjust', [body.coins_delta, body.energy_delta, body.note?.trim() || '']);
+    const replay = await replayCoinOperation(db, userId, body.request_id, fingerprint, session);
+    if (replay) return { newCoins: replay.coins, newEnergy: replay.energy };
+    let wallet = await col.findOne({ _id: userId }, { session });
+    if (!wallet) {
+      wallet = { _id: userId, username: '', noteLimit: NOTE_LIMIT.free, coins: 0, energy: 0, energyCap: 120,
+        lastDailyGrantAt: null, lastStandardSyncAt: null, createdAt: now };
+      await col.updateOne({ _id: userId }, { $setOnInsert: wallet }, { session, upsert: true });
+    }
+    wallet = await prepareCoinWallet(db, wallet, session, now);
+    requireCoinRequestId(wallet, body.request_id);
     const curCoins = wallet?.coins ?? 0;
     const curEnergy = wallet?.energy ?? 0;
     const cap = wallet?.energyCap ?? 120;
     const newCoins = Math.max(0, curCoins + body.coins_delta);
+    if (!Number.isSafeInteger(newCoins)) throw httpError('invalid_amount', 409);
     const newEnergy = Math.min(cap, Math.max(0, curEnergy + body.energy_delta));
 
     await col.updateOne(
@@ -141,9 +167,14 @@ admin.post('/energy', async (c) => {
       { upsert: true, session },
     );
 
+    const allocations = await spendCoinLots(db, wallet, Math.max(0, curCoins - newCoins), session);
+    const operationId = body.request_id ? coinOperationId(userId, body.request_id) : undefined;
+    if (newCoins > curCoins) await creditCoinLot(db, wallet, newCoins - curCoins, operationId!, session, now);
+    await recordCoinOperation(db, { ...wallet, coins: newCoins, energy: newEnergy }, body.request_id, fingerprint, allocations, session, now);
     await collections.energyLedger(db).insertOne(
       {
         _id: randomUUID(),
+        ...(operationId ? { coinOperationId: operationId, lotIds: newCoins > curCoins && wallet.coinLotsVersion === 1 ? [operationId] : allocations.map((a) => a.lotId) } : {}),
         userId,
         kind: 'admin_adjust',
         coinsDelta: newCoins - curCoins,
