@@ -88,7 +88,7 @@ energy.get('/', async (c) => {
   const history = await energyHistory(db, userId);
   const details = wallet?.coinLotsVersion === 1 ? await coinDetails(db, userId) : null;
   return c.json({ wallet: walletToWire(wallet && details?.enabled ? { ...wallet, coins: details.coins! } : wallet),
-    coin_details: details, history: historyToWire(history), limits: limitsToWire() });
+    coin_request_replay: true, coin_details: details, history: historyToWire(history), limits: limitsToWire() });
 });
 
 const convertSchema = z.object({ coins: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), request_id: z.string().uuid().optional() });

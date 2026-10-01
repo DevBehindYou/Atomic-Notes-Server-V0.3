@@ -26,9 +26,9 @@ admin.get('/health', async (c) => {
   try {
     const db = await getDb();
     await collections.notifications(db).countDocuments({});
-    return c.json({ db: true, dbError: null, configuration, time: new Date().toISOString() });
+    return c.json({ coin_request_replay: true, db: true, dbError: null, configuration, time: new Date().toISOString() });
   } catch (e) {
-    return c.json({ db: false, dbError: e instanceof Error ? e.message : 'DB error', configuration, time: new Date().toISOString() });
+    return c.json({ coin_request_replay: true, db: false, dbError: e instanceof Error ? e.message : 'DB error', configuration, time: new Date().toISOString() });
   }
 });
 

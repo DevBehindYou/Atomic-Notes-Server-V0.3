@@ -30,3 +30,5 @@ This is a new feature contract, not a claim that old releases already supported 
 ## Read-only reconciliation tool
 
 After separate rollout review, `node --env-file-if-exists=.env --import tsx src/scripts/reconcileCoins.ts` reports migrated wallet count, scalar/batch mismatches, and invalid remaining quantities. It never settles or initializes wallets and prints no account IDs. It compares stored summary with all remaining lots, including due but not yet settled lots; availability is evaluated separately by read/spend paths. This tool was tested only on disposable fixtures. Do not mistake a clean stored-summary report for permission to activate the policy or roll back code.
+
+GET /api/energy and admin health advertise coin_request_replay: true. New clients must verify that capability before sending/retrying monetary requests; old Servers ignore unknown request IDs. Deploy this Server before the clients. The expiry policy may remain inactive during this compatibility rollout.
