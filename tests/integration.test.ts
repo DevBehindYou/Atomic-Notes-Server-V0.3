@@ -1302,6 +1302,10 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
       const details = await json(await request('/energy/coins', 'GET', undefined, account.token));
       assert.equal(details.coins, 9); assert.equal(details.non_expiring_coins, 0); assert.equal(details.next_expiry_coins, 9);
       assert.equal(details.rows.length, 2);
+      const accountEmail = (await collections.users(db).findOne({ _id: account.id }))!.email;
+      const lookup = await json(await request(`/admin/user?email=${encodeURIComponent(accountEmail)}`, 'GET', undefined, undefined, 'test-admin-key'));
+      assert.equal(lookup.coins, lookup.coin_details.coins);
+      assert.equal(lookup.coins, 9);
       assert.equal((await request('/energy/coins')).status, 401);
       assert.equal((await request('/energy/coins?cursor=bad', 'GET', undefined, account.token)).status, 400);
       const other = await user();

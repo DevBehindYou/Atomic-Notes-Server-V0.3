@@ -66,6 +66,7 @@ admin.get('/user', async (c) => {
     .limit(1)
     .toArray();
 
+  const details = wallet?.coinLotsVersion === 1 ? await coinDetails(db, user._id) : null;
   return c.json({
     user_id: user._id,
     email: user.email,
@@ -74,8 +75,8 @@ admin.get('/user', async (c) => {
     last_sign_in_at: lastSession[0]?.createdAt.toISOString() ?? null,
     auth_created_at: user.createdAt.toISOString(),
     has_wallet: Boolean(wallet),
-    coins: wallet?.coins ?? 0,
-    coin_details: wallet?.coinLotsVersion === 1 ? await coinDetails(db, user._id) : null,
+    coins: details?.enabled ? details.coins : wallet?.coins ?? 0,
+    coin_details: details,
     energy: wallet?.energy ?? 0,
     energy_cap: wallet?.energyCap ?? 120,
     last_daily_grant_at: wallet?.lastDailyGrantAt?.toISOString() ?? null,
