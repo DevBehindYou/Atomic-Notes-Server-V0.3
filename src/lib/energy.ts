@@ -255,7 +255,10 @@ export async function energyUpgradeNoteLimit(db: Db, userId: string, fromLimit: 
     const replay = await replayCoinOperation(db, userId, requestId, fingerprint, session);
     if (replay) return replay;
     const wallet = await prepareCoinWallet(db, (await col.findOne({ _id: userId }, { session }))!, session);
-    if (wallet.noteLimit > fromLimit) return wallet;
+    if (wallet.noteLimit > fromLimit) {
+      await recordCoinOperation(db, wallet, requestId, fingerprint, [], session);
+      return wallet;
+    }
     if (wallet.noteLimit < fromLimit) throw new EnergyError('invalid_amount');
 
     const tierIndex = NOTE_LIMIT_TIERS.findIndex((t) => t.limit === wallet.noteLimit);

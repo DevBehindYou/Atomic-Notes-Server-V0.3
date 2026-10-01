@@ -1,3 +1,4 @@
+import { httpError } from '../lib/httpError.js';
 import { escapeRegex } from '../lib/validation.js';
 import { Hono } from 'hono';
 import { z } from 'zod';
@@ -146,6 +147,7 @@ admin.post('/energy', async (c) => {
     const curEnergy = wallet?.energy ?? 0;
     const cap = wallet?.energyCap ?? 120;
     const newCoins = Math.max(0, curCoins + body.coins_delta);
+    if (!Number.isSafeInteger(newCoins)) throw httpError('invalid_amount', 409);
     const newEnergy = Math.min(cap, Math.max(0, curEnergy + body.energy_delta));
 
     await col.updateOne(

@@ -1260,7 +1260,10 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
       assert.equal((await wallet(zero.id)).coins, 0, 'read-time expiry commits even when the later spend fails');
       const missingId = await request('/admin/energy', 'POST', { user_id: zero.id, coins_delta: 2 }, undefined, 'test-admin-key');
       assert.equal(missingId.status, 409);
-      assert.equal((await adjust(zero.id, -100)).status, 200, 'negative Controller adjustment retains clamp');
+      const clampedId = randomUUID();
+      const clamped = await Promise.all([adjust(zero.id, -100, clampedId), adjust(zero.id, -100, clampedId)]);
+      assert.deepEqual(clamped.map((r) => r.status), [200, 200], 'zero-effect adjustments are also replay-safe');
+      assert.equal(await collections.coinOperations(db).countDocuments({ userId: zero.id, requestId: clampedId }), 1);
       await reconcile(zero.id);
     });
     await ct.test('grant racing expiry, current reads, and rollback of configuration preserve batch authority', async () => {

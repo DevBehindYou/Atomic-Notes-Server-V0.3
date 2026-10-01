@@ -96,6 +96,8 @@ export function requireCoinRequestId(wallet: AtomicUserDoc, requestId?: string):
 export async function recordCoinOperation(db: Db, wallet: AtomicUserDoc, requestId: string | undefined,
   fingerprint: string, allocations: CoinAllocation[], session: ClientSession, now = new Date()) {
   if (!requestId) return;
+  // Even a clamped/no-op adjustment must serialize two attempts with the same request ID.
+  await collections.atomicUsers(db).updateOne({ _id: wallet._id }, { $inc: { coinMutationRevision: 1 } }, { session });
   await collections.coinOperations(db).insertOne({
     _id: coinOperationId(wallet._id, requestId), userId: wallet._id, requestId, fingerprint,
     allocations, result: wallet, createdAt: now,

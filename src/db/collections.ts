@@ -83,6 +83,7 @@ export const atomicUserSchema = z.object({
   username: z.string().default(''),
   noteLimit: z.number().int().default(30),
   coinLotsVersion: z.literal(1).optional(),
+  coinMutationRevision: z.number().int().optional(),
   coinPolicyActivatedAt: z.date().optional(),
   coins: z.number().int().default(5), // welcome gift, new wallets only
   energy: z.number().int().default(0),
