@@ -299,16 +299,11 @@ admin.post('/notifications', async (c) => {
   // Active and Inactive are decided now, while "who opened the App in the last 7 days" still means something:
   // anyone who later reads the feed has just opened it.
   let audienceSize: number;
+  let userIds: string[] = [];
   if (targetUserId) {
     audienceSize = 1;
   } else if (doc.targetAudience === 'active' || doc.targetAudience === 'inactive') {
-    const userIds = await audienceUserIds(db, doc.targetAudience);
-    if (userIds.length > 0) {
-      await collections.notificationRecipients(db).insertMany(
-        userIds.map((userId) => ({ _id: `${doc._id}:${userId}`, notificationId: doc._id, userId })),
-        { ordered: false },
-      );
-    }
+    userIds = await audienceUserIds(db, doc.targetAudience);
     audienceSize = userIds.length;
   } else if (doc.targetAudience === 'new') {
     // Nobody yet: it reaches accounts created from now on.
@@ -316,7 +311,18 @@ admin.post('/notifications', async (c) => {
   } else {
     audienceSize = await collections.users(db).countDocuments({});
   }
-  await collections.notifications(db).insertOne(doc);
+  // Publish the notice and its resolved audience together. A duplicate notice
+  // must not acquire new recipients, and a failed recipient insert must not
+  // leave a partial publication. Keep this resolved set stable across retries.
+  await withTransaction(async (session) => {
+    await collections.notifications(db).insertOne(doc, { session });
+    if (userIds.length > 0) {
+      await collections.notificationRecipients(db).insertMany(
+        userIds.map((userId) => ({ _id: `${doc._id}:${userId}`, notificationId: doc._id, userId })),
+        { session, ordered: true },
+      );
+    }
+  });
   return c.json({ row: toWire(doc), audience_size: audienceSize });
 });
 

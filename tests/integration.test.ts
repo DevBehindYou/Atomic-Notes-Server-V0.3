@@ -1119,6 +1119,41 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal(await collections.notificationStates(db).countDocuments({ notificationId: active.id }), 0);
   });
 
+  await t.test('failed republication cannot extend an existing notification audience', async () => {
+    const recipient = await user();
+    const id = randomUUID();
+    const publish = (target_audience: string) => request('/admin/notifications', 'POST', {
+      id, type: 'general', subject: 'publication rollback', description: 'fixture', target_audience,
+    }, undefined, 'test-admin-key');
+    // A currently active account must not receive a notice published to inactive accounts.
+    assert.equal((await publish('inactive')).status, 200);
+    const before = await collections.notificationRecipients(db).find({ notificationId: id }).sort({ _id: 1 }).toArray();
+    const { reachableNotification } = await import('../src/lib/notificationFeed');
+    assert.equal(await reachableNotification(db, recipient.id, id), null);
+    // The accepted optional ID can collide with an existing notification. A refused
+    // request must not attach its newly resolved audience to the existing document.
+    assert.equal((await publish('active')).status, 500);
+    assert.equal(await reachableNotification(db, recipient.id, id), null, 'failed publication must not grant access');
+    assert.deepEqual(await collections.notificationRecipients(db).find({ notificationId: id }).sort({ _id: 1 }).toArray(), before);
+    assert.equal((await collections.notifications(db).findOne({ _id: id }))!.targetAudience, 'inactive');
+  });
+
+  await t.test('recipient insertion failure leaves no partial publication', async () => {
+    const recipient = await user();
+    const id = randomUUID();
+    // Simulate a leftover recipient from an earlier failed attempt. A duplicate
+    // can fail midway through insertMany while other recipient inserts succeed.
+    const existing = { _id: `${id}:${recipient.id}`, notificationId: id, userId: recipient.id };
+    await collections.notificationRecipients(db).insertOne(existing);
+    const response = await request('/admin/notifications', 'POST', {
+      id, type: 'general', subject: 'recipient rollback', description: 'fixture', target_audience: 'active',
+    }, undefined, 'test-admin-key');
+    assert.equal(response.status, 500);
+    assert.equal(await collections.notifications(db).findOne({ _id: id }), null, 'failed recipient write must roll back the notice');
+    assert.deepEqual(await collections.notificationRecipients(db).find({ notificationId: id }).toArray(), [existing],
+      'failed publication must leave pre-existing recipients unchanged');
+  });
+
   await t.test('Controller sign-in is throttled per client and "log out everywhere" only moves forward', async () => {
     const attempt = async (client: string, result: string) => json(await request('/admin/controller/login-attempts', 'POST', { client, result }, undefined, 'test-admin-key'));
     const ip = '203.0.113.9';
