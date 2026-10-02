@@ -977,6 +977,129 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal(ttl?.expireAfterSeconds, 30 * 24 * 60 * 60);
   });
 
+  // R10 characterization, not desired guarantees. Remove only an expired fixture row
+  // to model TTL cleanup deterministically, without waiting for Mongo's TTL monitor.
+  // The suite's existing index tests verify the configured 30-day TTL separately.
+  const expiredAt = () => new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+  const expireFixtureOperation = async (userId: string, requestId: string) => {
+    const _id = `${userId}:${requestId}`;
+    assert.ok(await syncOperations(db).findOne({ _id, userId }));
+    const createdAt = expiredAt();
+    await syncOperations(db).updateOne({ _id, userId }, { $set: { createdAt } });
+    // The real TTL monitor may also remove it between these two statements.
+    await syncOperations(db).deleteOne({ _id, userId, createdAt });
+    assert.equal(await syncOperations(db).findOne({ _id, userId }), null);
+  };
+
+  await t.test('R10 expired tombstone hides deletion from an old cursor and permits a stale edit to recreate it', async () => {
+    const account = await user(), note = row();
+    const created = await json(await push([note], account.token));
+    const oldVersion = created.results[0].version, oldCursor = created.results[0].seq;
+    await refill(account.id);
+    const deletedResponse = await push([{ ...note, deleted: true, base_version: oldVersion }], account.token);
+    assert.equal(deletedResponse.status, 200);
+    const deleted = await json(deletedResponse);
+    const beforeExpiry = await json(await request(`/notes/pull?after=${oldCursor}`, 'GET', undefined, account.token));
+    assert.equal(beforeExpiry.rows.length, 1);
+    assert.equal(beforeExpiry.rows[0].id, note.id);
+    assert.equal(beforeExpiry.rows[0].deleted, true, 'retained tombstone delivers the deletion');
+
+    const staleEdit = { ...note, title: 'Offline edit from before deletion', base_version: oldVersion };
+    await refill(account.id);
+    const beforeWrites = writes;
+    const rejected = await push([staleEdit], account.token);
+    assert.equal(rejected.status, 502);
+    assert.equal((await json(rejected)).results[0].error, 'note_conflict');
+    assert.equal(writes, beforeWrites, 'retained tombstone prevents stale Drive writes');
+
+    const updatedAt = expiredAt();
+    await collections.notes(db).updateOne({ _id: note.id, userId: account.id, deleted: true }, { $set: { updatedAt } });
+    await collections.notes(db).deleteOne({ _id: note.id, userId: account.id, deleted: true, updatedAt });
+    assert.equal(await collections.notes(db).findOne({ _id: note.id }), null);
+    const afterExpiry = await json(await request(`/notes/pull?after=${oldCursor}`, 'GET', undefined, account.token));
+    assert.deepEqual(afterExpiry.rows, [], 'absence does not carry a deletion instruction');
+    assert.equal(afterExpiry.nextCursor, deleted.results[0].seq, 'cursor advances past the missing tombstone');
+    assert.equal(afterExpiry.hasMore, false);
+
+    await refill(account.id);
+    const restoredResponse = await push([staleEdit], account.token);
+    assert.equal(restoredResponse.status, 200, 'current behavior accepts a stale base when metadata is absent');
+    const restored = await json(restoredResponse);
+    const metadata = (await collections.notes(db).findOne({ _id: note.id, userId: account.id }))!;
+    assert.equal(metadata.deleted, false);
+    assert.ok(restored.results[0].version > deleted.results[0].version, 'R5 monotonic versions do not prevent resurrection');
+    assert.equal(files.get(metadata.driveFileId).title, staleEdit.title);
+    assert.equal(writes, beforeWrites + 1);
+  });
+
+  await t.test('R10 pending request expiry loses its prepaid charge while a retained pending request resumes once', async () => {
+    for (const expired of [false, true]) {
+      const account = await user(), requestId = randomUUID(), rows = [row()];
+      await energyGrantDaily(db, account.id); // Isolate receipt charges from the account's first daily grant.
+      await refill(account.id);
+      // Fixture represents a crash after beginSync committed its charge, before any Drive write.
+      // Normalize rows exactly as the route does before fingerprinting them.
+      await beginSync(db, account.id, requestId, rows.map((r) => remoteNoteRowSchema.parse(r)), 'instant');
+      assert.equal((await wallet(account.id)).energy, 90);
+      if (expired) await expireFixtureOperation(account.id, requestId);
+      const beforeWrites = writes;
+      const resumed = await push(rows, account.token, requestId, 'instant');
+      assert.equal(resumed.status, 200);
+      assert.equal(writes, beforeWrites + 1);
+      assert.equal((await wallet(account.id)).energy, expired ? 80 : 90);
+      assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id, kind: 'spend' }), expired ? 2 : 1);
+      assert.equal(await refundCount(account.id), 0, 'deleted pending operation is unavailable for abandoned-operation refund');
+    }
+  });
+
+  await t.test('R10 expired completed unchanged request can charge again without another Drive write', async () => {
+    const account = await user(), note = row();
+    const created = await json(await push([note], account.token));
+    await refill(account.id);
+    const rows = [{ ...note, base_version: created.results[0].version }], requestId = randomUUID();
+    const beforeWrites = writes;
+    const first = await push(rows, account.token, requestId, 'instant');
+    assert.equal(first.status, 200);
+    const result = await json(first);
+    assert.equal(result.results[0].unchanged, true);
+    assert.equal(result.charged, 10);
+    assert.equal((await wallet(account.id)).energy, 90);
+    assert.deepEqual(await json(await push(rows, account.token, requestId, 'instant')), result);
+    assert.equal((await wallet(account.id)).energy, 90, 'retained record replays without charging');
+    const spends = await collections.energyLedger(db).countDocuments({ userId: account.id, kind: 'spend' });
+
+    await expireFixtureOperation(account.id, requestId);
+    const repeated = await push(rows, account.token, requestId, 'instant');
+    assert.equal(repeated.status, 200);
+    assert.deepEqual(await json(repeated), result, 'identical response does not prove no second charge');
+    assert.equal(writes, beforeWrites);
+    assert.equal((await wallet(account.id)).energy, 80);
+    assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id, kind: 'spend' }), spends + 1);
+  });
+
+  await t.test('R10 expired completed changed request conflicts and refunds instead of replaying its success', async () => {
+    const account = await user(), requestId = randomUUID(), rows = [row()];
+    await energyGrantDaily(db, account.id); // Isolate receipt charges from the account's first daily grant.
+    await refill(account.id);
+    const first = await push(rows, account.token, requestId, 'instant');
+    assert.equal(first.status, 200);
+    const firstBody = await json(first), beforeWrites = writes;
+    assert.deepEqual(await json(await push(rows, account.token, requestId, 'instant')), firstBody);
+    assert.equal((await wallet(account.id)).energy, 90);
+
+    await expireFixtureOperation(account.id, requestId);
+    const repeated = await push(rows, account.token, requestId, 'instant');
+    assert.equal(repeated.status, 502);
+    const result = await json(repeated);
+    assert.equal(result.results[0].error, 'note_conflict');
+    assert.deepEqual([result.charged, result.refunded], [10, 10]);
+    assert.equal(writes, beforeWrites);
+    assert.equal((await wallet(account.id)).energy, 90, 'not every expired replay causes a net second charge');
+    assert.equal(await refundCount(account.id), 1);
+    assert.deepEqual(await json(await push(rows, account.token, requestId, 'instant')), result);
+    assert.equal(await refundCount(account.id), 1, 'newly recorded failure is itself replay-safe');
+  });
+
   await t.test('log rows expire after 30 days and the energy ledger is kept', async () => {
     const logTtl = (await collections.logs(db).indexes()).find((index) => index.name === 'logs_ttl');
     assert.deepEqual(logTtl?.key, { createdAt: 1 });
