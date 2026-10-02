@@ -319,8 +319,8 @@ export async function ensureIndexes(db: Db) {
   await collections.coinLots(db).createIndex({ userId: 1, creditedAt: -1, _id: -1 });
   await collections.coinOperations(db).createIndex({ userId: 1, requestId: 1 }, { unique: true });
   await db.collection("sync_operations").createIndex({ userId: 1, status: 1 });
-  // Records only need to outlive the retries of a request; keep them for 30 days.
-  await db.collection("sync_operations").createIndex({ createdAt: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60 });
+  // Keep pending charges and completed replay receipts for long-offline clients.
+  // Existing TTL indexes require the separate, explicitly applied retention transition.
   await db.collection("oauth_states").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
   await db.collection("operation_locks").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
   await collections.users(db).createIndex({ email: 1 }, { unique: true });
@@ -332,9 +332,8 @@ export async function ensureIndexes(db: Db) {
   await collections.notes(db).createIndex({ userId: 1, deleted: 1 });
   await collections.notes(db).createIndex({ userId: 1, updatedAt: 1 });
   await collections.notes(db).createIndex({ userId: 1, syncSequence: 1 });
-  // A deleted note's row (a tombstone) is only needed until every device has seen the deletion, and its
-  // Drive file leaves the Drive trash after 30 days. The partial filter keeps live notes out of the index.
-  await collections.notes(db).createIndex({ updatedAt: 1 }, { name: 'tombstone_ttl', expireAfterSeconds: 30 * 24 * 60 * 60, partialFilterExpression: { deleted: true } });
+  // Retain tombstones independently of Drive trash lifetime: an offline device may
+  // still need the deletion and its conflict version. Explicit cloud wipe is unchanged.
   await collections.sessions(db).createIndex({ userId: 1, createdAt: -1 });
   await collections.folders(db).createIndex({ userId: 1 });
   await collections.logs(db).createIndex({ userId: 1, createdAt: -1 });

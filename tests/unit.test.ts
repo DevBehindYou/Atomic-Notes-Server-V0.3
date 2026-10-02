@@ -17,6 +17,16 @@ import { isDriveNotFound, isDriveRetryable, withDriveRetry } from '../src/lib/go
 import { isInvalidGrant } from '../src/lib/googleOAuth';
 import { httpError } from '../src/lib/httpError';
 import { SUPPORT_URL, WELCOME_NOTIFICATIONS } from '../src/lib/welcomeNotifications';
+import { retentionArguments } from '../src/db/syncRetention';
+
+test('retention tooling defaults to inspection and requires an explicit database for apply', () => {
+  assert.deepEqual(retentionArguments([]), { apply: false });
+  assert.deepEqual(retentionArguments(['--apply', '--database', 'disposable_test']), { apply: true, database: 'disposable_test' });
+  for (const args of [['--apply'], ['--apply', '--database', ''], ['--apply', '--database', '--other'],
+    ['--database', 'test'], ['--apply', '--database', 'test', '--force'], ['--force']]) {
+    assert.throws(() => retentionArguments(args), /usage:/);
+  }
+});
 
 test('current Flutter push payload omits updated_at and cannot choose its owner', () => {
   const row = remoteNoteRowSchema.parse({
