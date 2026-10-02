@@ -945,10 +945,9 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     }
   });
 
-  await t.test('deleted notes expire after 30 days, and only the newest 5 sessions stay valid', async () => {
-    const ttl = (await collections.notes(db).indexes()).find((index) => index.name === 'tombstone_ttl');
-    assert.equal(ttl?.expireAfterSeconds, 30 * 24 * 60 * 60);
-    assert.deepEqual(ttl?.partialFilterExpression, { deleted: true });
+  await t.test('R10 deleted-note history has no automatic expiry, and only the newest 5 sessions stay valid', async () => {
+    const ttl = (await collections.notes(db).indexes()).filter((index) => index.expireAfterSeconds !== undefined);
+    assert.deepEqual(ttl, [], 'deletion history must remain available to long-offline clients');
 
     const account = await user(), tokens = [account.token];
     for (let i = 0; i < 7; i++) { await delay(3); tokens.push(await createSession(db, account.id)); }
@@ -971,10 +970,10 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
       async () => ({ sub: randomUUID(), email: 'unverified@example.com', email_verified: false })), { error: 'invalid_id_token' });
   });
 
-  await t.test('sync operation records expire after 30 days', async () => {
+  await t.test('R10 sync operation receipts have no automatic expiry', async () => {
     const indexes = await db.collection('sync_operations').indexes();
-    const ttl = indexes.find((index) => index.key.createdAt === 1);
-    assert.equal(ttl?.expireAfterSeconds, 30 * 24 * 60 * 60);
+    assert.deepEqual(indexes.filter((index) => index.expireAfterSeconds !== undefined), [],
+      'pending charges and completed replay outcomes must not expire');
   });
 
   await t.test('log rows expire after 30 days and the energy ledger is kept', async () => {
