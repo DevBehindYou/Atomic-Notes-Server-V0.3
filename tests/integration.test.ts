@@ -1035,6 +1035,7 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
   await t.test('R10 pending request expiry loses its prepaid charge while a retained pending request resumes once', async () => {
     for (const expired of [false, true]) {
       const account = await user(), requestId = randomUUID(), rows = [row()];
+      await energyGrantDaily(db, account.id); // Isolate receipt charges from the account's first daily grant.
       await refill(account.id);
       // Fixture represents a crash after beginSync committed its charge, before any Drive write.
       // Normalize rows exactly as the route does before fingerprinting them.
@@ -1078,6 +1079,7 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
 
   await t.test('R10 expired completed changed request conflicts and refunds instead of replaying its success', async () => {
     const account = await user(), requestId = randomUUID(), rows = [row()];
+    await energyGrantDaily(db, account.id); // Isolate receipt charges from the account's first daily grant.
     await refill(account.id);
     const first = await push(rows, account.token, requestId, 'instant');
     assert.equal(first.status, 200);
