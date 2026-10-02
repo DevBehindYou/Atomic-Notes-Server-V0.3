@@ -3,6 +3,8 @@ import test from 'node:test';
 import { randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Hono } from 'hono';
+import { BSON } from 'mongodb';
+import { applySyncRetention, inspectSyncRetention } from '../src/db/syncRetention';
 
 // This suite creates and drops only its own database on a disposable local runner.
 const uri = process.env.MONGODB_URI;
@@ -50,6 +52,58 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
   });
   assert.ok((await db.admin().command({ hello: 1 })).setName, 'Transactions require a replica set');
   await ensureIndexes(db);
+
+  await t.test('R10 retention transition is scoped, preflighted, read-only by default and resumable', async () => {
+    const unchangedNames = ['sessions', 'oauth_states', 'operation_locks', 'logs', 'controller_login_attempts'];
+    const beforeOther = await Promise.all(unchangedNames.map((name) => db.collection(name).indexes()));
+    const createOldIndexes = async (seconds = 30 * 24 * 60 * 60) => {
+      await db.collection('notes').createIndex({ updatedAt: 1 }, { name: 'tombstone_ttl', expireAfterSeconds: 30 * 24 * 60 * 60, partialFilterExpression: { deleted: true } });
+      await db.collection('sync_operations').createIndex({ createdAt: 1 }, { expireAfterSeconds: seconds });
+    };
+    // Current dates prevent the TTL monitor interfering with the index transition fixture.
+    const fixtures = [
+      { collection: 'notes', value: { _id: 'retention-index-sentinel', deleted: true, updatedAt: new Date() } },
+      { collection: 'sync_operations', value: { _id: 'retention-index-sentinel', status: 'pending', createdAt: new Date() } },
+    ];
+    const fixtureCollection = (name: string) => db.collection<{ _id: string; [key: string]: unknown }>(name);
+    for (const fixture of fixtures) await fixtureCollection(fixture.collection).insertOne(fixture.value);
+    await createOldIndexes(86400); // Unexpected TTL duration must stop before either drop.
+    await assert.rejects(() => applySyncRetention(db, databaseName), /sync_retention_index_drift/);
+    assert.ok((await db.collection('notes').indexes()).some((i) => i.name === 'tombstone_ttl'));
+    await db.collection('sync_operations').dropIndex('createdAt_1');
+    await createOldIndexes();
+    const plan = await inspectSyncRetention(db);
+    assert.deepEqual(plan, { database: databaseName, drops: [
+      { collection: 'notes', name: 'tombstone_ttl' }, { collection: 'sync_operations', name: 'createdAt_1' },
+    ] });
+    assert.deepEqual(await inspectSyncRetention(db), plan, 'inspection must not remove indexes');
+    await assert.rejects(() => applySyncRetention(db, 'different_database'), /sync_retention_database_mismatch/);
+    assert.deepEqual(await inspectSyncRetention(db), plan, 'wrong database leaves both indexes intact');
+    const failingDb = {
+      databaseName: db.databaseName,
+      listCollections: db.listCollections.bind(db),
+      collection(name: string) {
+        const collection = db.collection(name);
+        return {
+          indexes: collection.indexes.bind(collection),
+          dropIndex: name === 'sync_operations'
+            ? async () => { throw new Error('fixture_index_drop_failure'); }
+            : collection.dropIndex.bind(collection),
+        };
+      },
+    } as unknown as typeof db;
+    await assert.rejects(() => applySyncRetention(failingDb, databaseName), /fixture_index_drop_failure/);
+    assert.deepEqual((await inspectSyncRetention(db)).drops, [{ collection: 'sync_operations', name: 'createdAt_1' }]);
+    await applySyncRetention(db, databaseName);
+    assert.deepEqual((await applySyncRetention(db, databaseName)).drops, [], 'repeated application is a no-op');
+    await ensureIndexes(db);
+    assert.deepEqual((await inspectSyncRetention(db)).drops, [], 'general index setup must not restore expiry');
+    for (const fixture of fixtures) {
+      assert.deepEqual(await fixtureCollection(fixture.collection).findOne({ _id: fixture.value._id }), fixture.value);
+      await fixtureCollection(fixture.collection).deleteOne({ _id: fixture.value._id });
+    }
+    assert.deepEqual(await Promise.all(unchangedNames.map((name) => db.collection(name).indexes())), beforeOther);
+  });
 
   const files = new Map<string, any>();
   let afterUpdateWrite: (() => Promise<void>) | null = null;
@@ -982,6 +1036,77 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal(logTtl?.expireAfterSeconds, 30 * 24 * 60 * 60);
     const ledger = await collections.energyLedger(db).indexes();
     assert.equal(ledger.some((index) => index.expireAfterSeconds !== undefined), false);
+  });
+
+  await t.test('R10 year-old tombstone still delivers deletion and rejects stale edits, while explicit wipe preserves receipts', async () => {
+    const account = await user(), note = row();
+    const created = await json(await push([note], account.token));
+    await refill(account.id);
+    const requestId = randomUUID();
+    const removed = await push([{ ...note, deleted: true, base_version: created.results[0].version }], account.token, requestId);
+    assert.equal(removed.status, 200);
+    const old = new Date(Date.now() - 366 * 24 * 60 * 60 * 1000);
+    await collections.notes(db).updateOne({ _id: note.id }, { $set: { updatedAt: old } });
+    const pulled = await json(await request(`/notes/pull?after=${created.results[0].seq}`, 'GET', undefined, account.token));
+    assert.equal(pulled.rows[0].id, note.id);
+    assert.equal(pulled.rows[0].deleted, true);
+    await refill(account.id);
+    const beforeWrites = writes;
+    const rejected = await push([{ ...note, title: 'Old offline edit', base_version: created.results[0].version }], account.token);
+    assert.equal(rejected.status, 502);
+    assert.equal((await json(rejected)).results[0].error, 'note_conflict');
+    assert.equal(writes, beforeWrites);
+    const receipt = await syncOperations(db).findOne({ _id: `${account.id}:${requestId}` });
+    assert.equal((await request('/notes', 'DELETE', undefined, account.token)).status, 200);
+    assert.equal(await collections.notes(db).countDocuments({ userId: account.id }), 0);
+    assert.deepEqual(await syncOperations(db).findOne({ _id: `${account.id}:${requestId}` }), receipt);
+    assert.deepEqual((await json(await request('/notes/pull?after=0', 'GET', undefined, account.token))).rows, [],
+      'explicit cloud wipe still does not instruct clients to delete local notes');
+  });
+
+  for (const mode of ['standard', 'instant'] as const) {
+    await t.test(`R10 year-old ${mode} receipts preserve pending charges, completed replay and abandoned refunds`, async () => {
+      const account = await user(), requestId = randomUUID(), rows = [row()];
+      await energyGrantDaily(db, account.id);
+      await refill(account.id);
+      const pending = await beginSync(db, account.id, requestId, rows.map((r) => remoteNoteRowSchema.parse(r)), mode);
+      const old = new Date(Date.now() - 366 * 24 * 60 * 60 * 1000);
+      await syncOperations(db).updateOne({ _id: pending._id }, { $set: { createdAt: old } });
+      if (mode === 'standard') await collections.atomicUsers(db).updateOne({ _id: account.id }, { $set: { lastStandardSyncAt: old } });
+      const beforeEnergy = (await wallet(account.id)).energy, beforeWrites = writes;
+      const resumed = await push(rows, account.token, requestId, mode);
+      assert.equal(resumed.status, 200);
+      const completed = await json(resumed);
+      assert.equal((await wallet(account.id)).energy, beforeEnergy);
+      assert.equal(writes, beforeWrites + 1);
+      assert.deepEqual(await json(await push(rows, account.token, requestId, mode)), completed);
+      assert.equal((await wallet(account.id)).energy, beforeEnergy);
+      assert.equal(writes, beforeWrites + 1);
+      assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id, kind: 'spend' }), 1);
+
+      await refill(account.id);
+      const abandoned = await beginSync(db, account.id, randomUUID(), [row()], mode);
+      await syncOperations(db).updateOne({ _id: abandoned._id }, { $set: { createdAt: old } });
+      if (mode === 'standard') await collections.atomicUsers(db).updateOne({ _id: account.id }, { $set: { lastStandardSyncAt: old } });
+      const later = await push([row()], account.token, randomUUID(), mode);
+      assert.equal(later.status, 200);
+      assert.equal((await syncOperations(db).findOne({ _id: abandoned._id }))!.refunded, pending.charged);
+      assert.equal(await refundCount(account.id), 1);
+      assert.equal((await wallet(account.id)).energy, 100 - pending.charged);
+    });
+  }
+
+  await t.test('R10 reports raw BSON receipt size at fixed fixture batch sizes without storing note text', async () => {
+    const account = await user(), note = row();
+    await push([note], account.token);
+    const receipt = (await syncOperations(db).findOne({ userId: account.id }))!;
+    const tombstoneShape = { ...(await collections.notes(db).findOne({ _id: note.id }))!, deleted: true };
+    for (const count of [1, 50, 100]) {
+      const results = Array.from({ length: count }, () => ({ ...receipt.results[0], id: randomUUID() }));
+      const sample = { ...receipt, rowIds: results.map((r) => r.id), results };
+      assert.equal(JSON.stringify(sample).includes(note.body), false);
+      console.log(`RETENTION_BSON rows=${count} receiptBytes=${BSON.calculateObjectSize(sample)} tombstoneBytes=${BSON.calculateObjectSize(tombstoneShape)}`);
+    }
   });
 
   await t.test('returning Google login links by subject, reuses the refresh token and repairs missing Drive setup', async () => {
