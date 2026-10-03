@@ -362,8 +362,9 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     const writesBefore = writes;
     for (let i = 0; i < 2; i++) {
       const response = await push(rows, account.token, requestId, 'instant');
-      assert.equal(response.status, 200);
-      const body = await response.json() as { charged: number; refunded: number };
+      assert.equal(response.status, 502); // Replay preserves the failed operation outcome.
+      const body = await response.json() as { charged: number; refunded: number; error: string };
+      assert.equal(body.error, 'note_sync_failed');
       assert.equal(body.charged, 10); assert.equal(body.refunded, 10);
     }
     assert.equal(writes, writesBefore);
