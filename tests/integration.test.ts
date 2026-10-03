@@ -201,6 +201,44 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     }
   });
 
+  await t.test('inactive ledger cleanup preserves totals, rolls back and survives repeated concurrent batches', async () => {
+    const { archiveLedgerBatch, ledgerArchives, ledgerRecent } = await import('../src/lib/ledgerRetention');
+    const { combineLedgerStatistics, projectArchivedStatistics } = await import('../src/lib/ledgerStatistics');
+    const account = await user(), neighbour = await user(), at = Date.now();
+    await collections.energyLedger(db).deleteMany({ userId: account.id });
+    const rows = Array.from({ length: 255 }, (_, i) => ({ _id: randomUUID(), userId: account.id,
+      kind: 'admin_adjust' as const, coinsDelta: i % 2 ? -2 : 5, energyDelta: i % 3 ? -10 : 20,
+      resultingCoins: 5, resultingEnergy: 0, note: 'Retention fixture', createdAt: new Date(at - Math.floor(i / 3)) }));
+    await collections.energyLedger(db).insertMany(rows);
+    const wallet = await collections.atomicUsers(db).findOne({ _id: account.id });
+    const neighbourRows = await collections.energyLedger(db).find({ userId: neighbour.id }).toArray();
+    const expected = combineLedgerStatistics(rows, projectArchivedStatistics(account.id, [], at), at);
+    await assert.rejects(() => withTransaction(async session => {
+      assert.equal(await archiveLedgerBatch(db, account.id, session, at), 100);
+      throw new Error('fixture_abort_after_pruning');
+    }), /fixture_abort_after_pruning/);
+    assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id }), 255);
+    assert.equal(await ledgerArchives(db).findOne({ _id: account.id }), null);
+    assert.equal(await ledgerRecent(db).countDocuments({ userId: account.id }), 0);
+    assert.deepEqual(await collections.atomicUsers(db).findOne({ _id: account.id }), wallet);
+    const removed = await Promise.all(Array.from({ length: 4 }, () => withTransaction(session => archiveLedgerBatch(db, account.id, session, at))));
+    assert.equal(removed.reduce((sum, n) => sum + n, 0), 205);
+    assert.equal(await withTransaction(session => archiveLedgerBatch(db, account.id, session, at)), 0);
+    const retained = await collections.energyLedger(db).find({ userId: account.id }).sort({ createdAt: -1, _id: -1 }).toArray();
+    assert.equal(retained.length, 50);
+    const archive = (await ledgerArchives(db).findOne({ _id: account.id }))!;
+    const recent = await ledgerRecent(db).find({ userId: account.id }).toArray();
+    assert.deepEqual(combineLedgerStatistics(retained, { userId: account.id, projectedAt: archive.projectedAt,
+      byKind: archive.byKind, recent }, at), expected);
+    assert.deepEqual(await collections.energyLedger(db).find({ userId: neighbour.id }).toArray(), neighbourRows);
+    const after = (await collections.atomicUsers(db).findOne({ _id: account.id }))!;
+    assert.equal(after.coins, wallet!.coins); assert.equal(after.energy, wallet!.energy);
+    await assert.rejects(() => withTransaction(session => archiveLedgerBatch(db, account.id, session, at - 1)), /statistics_time_regression/);
+    await withTransaction(session => archiveLedgerBatch(db, account.id, session, at + 86400001));
+    assert.equal(await ledgerRecent(db).countDocuments({ userId: account.id }), 0);
+    assert.deepEqual((await ledgerArchives(db).findOne({ _id: account.id }))!.byKind, archive.byKind);
+  });
+
   await t.test('owner isolation, partial updates and failed pushes', async () => {
     const original = row(); assert.equal((await push([original])).status, 200);
     const before = writes;
