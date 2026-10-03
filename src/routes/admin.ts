@@ -240,11 +240,39 @@ async function deliveryCounts(db: Awaited<ReturnType<typeof getDb>>, ids: string
 }
 
 admin.get('/notifications', async (c) => {
+  const limit = z.string().regex(/^(?:[1-9]|[1-4][0-9]|50)$/)
+    .transform(Number).safeParse(c.req.query('limit') ?? '50');
+  if (!limit.success) return c.json({ error: 'invalid_notification_limit' }, 400);
+  let cursor: { created_at: string; id: string } | null = null;
+  const encodedCursor = c.req.query('cursor');
+  if (encodedCursor !== undefined) {
+    if (encodedCursor.length > 512 || !/^[A-Za-z0-9_-]+$/.test(encodedCursor)) {
+      return c.json({ error: 'invalid_notification_cursor' }, 400);
+    }
+    try {
+      cursor = z.object({ created_at: z.string().datetime(), id: z.string().uuid() }).strict()
+        .parse(JSON.parse(Buffer.from(encodedCursor, 'base64url').toString('utf8')));
+    } catch {
+      return c.json({ error: 'invalid_notification_cursor' }, 400);
+    }
+  }
   const db = await getDb();
-  const rows = await collections.notifications(db).find({}).sort({ createdAt: -1 }).toArray();
+  const createdAt = cursor ? new Date(cursor.created_at) : null;
+  const filter = cursor ? { $or: [
+    { createdAt: { $lt: createdAt! } },
+    { createdAt: createdAt!, _id: { $lt: cursor.id } },
+  ] } : {};
+  const candidates = await collections.notifications(db).find(filter)
+    .sort({ createdAt: -1, _id: -1 }).limit(limit.data + 1).toArray();
+  const rows = candidates.slice(0, limit.data);
   const counts = await deliveryCounts(db, rows.map((n) => n._id));
+  const last = rows.at(-1);
+  const nextCursor = candidates.length > limit.data && last
+    ? Buffer.from(JSON.stringify({ created_at: last.createdAt.toISOString(), id: last._id })).toString('base64url')
+    : null;
   return c.json({
     rows: rows.map((n) => ({ ...toWire(n), recipients: counts.recipients.get(n._id) ?? null, reads: counts.reads.get(n._id) ?? 0 })),
+    next_cursor: nextCursor,
   });
 });
 
