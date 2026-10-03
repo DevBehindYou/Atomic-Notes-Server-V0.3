@@ -22,6 +22,7 @@ delete process.env.COIN_EXPIRY_ACTIVATED_AT; // Existing contract/budget fixture
 process.env.ADMIN_API_KEY = 'test-admin-key';
 process.env.TOKEN_ENCRYPTION_KEY = Buffer.alloc(32, 3).toString('base64');
 
+const { appendLedger } = await import('../src/lib/ledger');
 const { getDb, closeDb, withTransaction } = await import('../src/db/mongo');
 const { collections, ensureIndexes } = await import('../src/db/collections');
 const { createSession, verifySession } = await import('../src/lib/session');
@@ -172,6 +173,45 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     if (token === owner.token && mode === 'standard') await refill(owner.id);
     return request('/notes/push', 'POST', { rows, requestId, mode }, token);
   };
+
+  await t.test('ledger boundary rejects detached writes and rolls back with wallet mutations', async () => {
+    const account = await user();
+    const wallet = await collections.atomicUsers(db).findOne({ _id: account.id });
+    const before = await collections.energyLedger(db).countDocuments({ userId: account.id });
+    const entry = { _id: randomUUID(), userId: account.id, kind: 'admin_adjust' as const,
+      coinsDelta: 1, energyDelta: 0, resultingCoins: wallet!.coins + 1,
+      resultingEnergy: wallet!.energy, note: 'Synthetic rollback', createdAt: new Date() };
+    await withTransaction(async (session) => {
+      await session.abortTransaction();
+      await assert.rejects(() => appendLedger(db, session, entry), /ledger_transaction_required/);
+    });
+    await assert.rejects(() => withTransaction(async (session) => {
+      await collections.atomicUsers(db).updateOne({ _id: account.id }, { $inc: { coins: 1 } }, { session });
+      await appendLedger(db, session, entry);
+      throw new Error('fixture_abort_after_ledger');
+    }), /fixture_abort_after_ledger/);
+    assert.deepEqual(await collections.atomicUsers(db).findOne({ _id: account.id }), wallet);
+    assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id }), before);
+    assert.equal(await collections.energyLedger(db).findOne({ _id: entry._id }), null);
+  });
+
+  await t.test('concurrent transactional ledger writes preserve each wallet mutation exactly once', async () => {
+    const account = await user();
+    const before = (await collections.atomicUsers(db).findOne({ _id: account.id }))!;
+    const count = await collections.energyLedger(db).countDocuments({ userId: account.id });
+    await Promise.all(Array.from({ length: 10 }, () => withTransaction(async (session) => {
+      const wallet = await collections.atomicUsers(db).findOneAndUpdate({ _id: account.id },
+        { $inc: { coins: 1 } }, { returnDocument: 'after', session });
+      await appendLedger(db, session, { _id: randomUUID(), userId: account.id, kind: 'admin_adjust',
+        coinsDelta: 1, energyDelta: 0, resultingCoins: wallet!.coins, resultingEnergy: wallet!.energy,
+        note: 'Synthetic concurrent credit', createdAt: new Date() });
+    })));
+    assert.equal((await collections.atomicUsers(db).findOne({ _id: account.id }))!.coins, before.coins + 10);
+    const entries = await collections.energyLedger(db).find({ userId: account.id, note: 'Synthetic concurrent credit' }).toArray();
+    assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id }), count + 10);
+    assert.deepEqual(entries.map(e => e.resultingCoins).sort((a, b) => a - b),
+      Array.from({ length: 10 }, (_, i) => before.coins + i + 1));
+  });
 
   await t.test('owner isolation, partial updates and failed pushes', async () => {
     const original = row(); assert.equal((await push([original])).status, 200);

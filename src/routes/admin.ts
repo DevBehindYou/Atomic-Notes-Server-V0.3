@@ -1,3 +1,4 @@
+import { appendLedger } from '../lib/ledger.js';
 import { httpError } from '../lib/httpError.js';
 import { escapeRegex } from '../lib/validation.js';
 import { Hono } from 'hono';
@@ -171,7 +172,7 @@ admin.post('/energy', async (c) => {
     const operationId = body.request_id ? coinOperationId(userId, body.request_id) : undefined;
     if (newCoins > curCoins) await creditCoinLot(db, wallet, newCoins - curCoins, operationId!, session, now);
     await recordCoinOperation(db, { ...wallet, coins: newCoins, energy: newEnergy }, body.request_id, fingerprint, allocations, session, now);
-    await collections.energyLedger(db).insertOne(
+    await appendLedger(db, session, 
       {
         _id: randomUUID(),
         ...(operationId ? { coinOperationId: operationId, lotIds: newCoins > curCoins && wallet.coinLotsVersion === 1 ? [operationId] : allocations.map((a) => a.lotId) } : {}),
@@ -184,9 +185,7 @@ admin.post('/energy', async (c) => {
         // The App shows this note in the user's Activity list, so the default speaks to them.
         note: body.note?.trim() || 'Balance adjusted by Atomic Notes',
         createdAt: new Date(),
-      },
-      { session },
-    );
+      });
 
     return { newCoins, newEnergy };
   });

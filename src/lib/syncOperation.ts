@@ -1,3 +1,4 @@
+import { appendLedger } from './ledger.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Db } from 'mongodb';
 import { collections } from '../db/collections.js';
@@ -76,9 +77,9 @@ export async function openSync(db: Db, userId: string, requestId: string, rows: 
     await collections.atomicUsers(db).updateOne({ _id: userId }, {
       $inc: { energy: -charged }, ...(mode === 'standard' ? { $set: { lastStandardSyncAt: now } } : {}),
     }, { session });
-    await collections.energyLedger(db).insertOne({ _id: randomUUID(), userId, kind: 'spend', coinsDelta: 0,
+    await appendLedger(db, session, { _id: randomUUID(), userId, kind: 'spend', coinsDelta: 0,
       energyDelta: -charged, resultingCoins: current.coins, resultingEnergy: current.energy - charged,
-      note: `${mode === 'instant' ? 'Instant' : 'Standard'} sync`, createdAt: now }, { session });
+      note: `${mode === 'instant' ? 'Instant' : 'Standard'} sync`, createdAt: now });
     await syncOperations(db).insertOne(operation, { session });
     return operation;
   });
@@ -153,9 +154,9 @@ async function finishSyncAtomically(db: Db, operation: SyncOperation) {
         }, { session });
       }
       if (refunded > 0) {
-        await collections.energyLedger(db).insertOne({ _id: randomUUID(), userId: current.userId, kind: 'admin_adjust',
+        await appendLedger(db, session, { _id: randomUUID(), userId: current.userId, kind: 'admin_adjust',
           coinsDelta: 0, energyDelta: refunded, resultingCoins: wallet.coins, resultingEnergy: wallet.energy + refunded,
-          note: 'Refund: sync failed before any note succeeded', createdAt: new Date() }, { session });
+          note: 'Refund: sync failed before any note succeeded', createdAt: new Date() });
       }
     }
     await syncOperations(db).updateOne({ _id: current._id }, { $set: { results, refunded, status: 'complete' } }, { session });

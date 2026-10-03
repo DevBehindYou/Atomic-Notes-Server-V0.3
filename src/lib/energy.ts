@@ -1,3 +1,4 @@
+import { appendLedger } from './ledger.js';
 import { randomUUID } from 'node:crypto';
 import type { Db } from 'mongodb';
 import { collections, type AtomicUserDoc } from '../db/collections.js';
@@ -148,10 +149,8 @@ async function writeLedger(
     lotIds?: string[];
   },
 ) {
-  await collections.energyLedger(db).insertOne(
-    { _id: randomUUID(), createdAt: new Date(), ...entry },
-    { session },
-  );
+  await appendLedger(db, session, 
+    { _id: randomUUID(), createdAt: new Date(), ...entry });
 }
 
 /**
