@@ -344,6 +344,7 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     const { archiveLedgerBatch } = await import('../src/lib/ledgerRetention');
     const account = await user(), requestId = randomUUID(), rows = [row()];
     await refill(account.id);
+    await collections.atomicUsers(db).updateOne({ _id: account.id }, { $set: { lastDailyGrantAt: new Date() } });
     const operation = await beginSync(db, account.id, requestId, rows.map(value => remoteNoteRowSchema.parse(value)), 'instant');
     const charge = await collections.energyLedger(db).findOne({ userId: account.id, kind: 'spend' });
     assert.ok(charge);
