@@ -44,7 +44,8 @@ notifications.post('/:id/dismiss', async (c) => {
   const userId = c.get('userId') as string;
   const notification = await reachableNotification(db, userId, id);
   if (!notification) return c.json({ error: 'not_found' }, 404);
-  // Pinned by the Controller (a critical incident, a required update): it stays until it is resolved.
+  // Pinned by the Controller: the user cannot dismiss it. Visibility still
+  // follows audience, version, expiry and the bounded feed selection.
   if (!notification.dismissible) return c.json({ error: 'not_dismissible' }, 409);
   await markNotification(db, userId, id, { dismiss: true });
   return c.json({ ok: true });
