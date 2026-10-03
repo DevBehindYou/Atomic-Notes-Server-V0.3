@@ -290,9 +290,9 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     const wallet = (await collections.atomicUsers(db).findOne({ _id: account.id }))!;
     const observations: Awaited<ReturnType<typeof readRetainedLedgerStatistics>>[] = [];
     await Promise.all([
-      ...Array.from({ length: 5 }, () => request('/admin/energy', 'POST', {
+      ...Array.from({ length: 5 }, async () => { const response = await request('/admin/energy', 'POST', {
         user_id: account.id, coins_delta: 1, energy_delta: 0, request_id: randomUUID(),
-      }, undefined, 'test-admin-key').then(response => assert.equal(response.status, 200))),
+      }, undefined, 'test-admin-key'); assert.equal(response.status, 200); }),
       ...Array.from({ length: 3 }, () => withTransaction(session => archiveLedgerBatch(db, account.id, session, now))),
       (async () => { for (let i = 0; i < 8; i++) observations.push(await readRetainedLedgerStatistics(db, account.id, now)); })(),
     ]);
