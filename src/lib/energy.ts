@@ -149,7 +149,7 @@ async function writeLedger(
     lotIds?: string[];
   },
 ) {
-  await appendLedger(db, session, 
+  await appendLedger(db, session,
     { _id: randomUUID(), createdAt: new Date(), ...entry });
 }
 

@@ -172,7 +172,7 @@ admin.post('/energy', async (c) => {
     const operationId = body.request_id ? coinOperationId(userId, body.request_id) : undefined;
     if (newCoins > curCoins) await creditCoinLot(db, wallet, newCoins - curCoins, operationId!, session, now);
     await recordCoinOperation(db, { ...wallet, coins: newCoins, energy: newEnergy }, body.request_id, fingerprint, allocations, session, now);
-    await appendLedger(db, session, 
+    await appendLedger(db, session,
       {
         _id: randomUUID(),
         ...(operationId ? { coinOperationId: operationId, lotIds: newCoins > curCoins && wallet.coinLotsVersion === 1 ? [operationId] : allocations.map((a) => a.lotId) } : {}),
