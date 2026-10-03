@@ -1,3 +1,4 @@
+import { appendLedger } from './ledger.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type { ClientSession, Db } from 'mongodb';
 import { collections, type AtomicUserDoc, type CoinAllocation, type CoinLotDoc } from '../db/collections.js';
@@ -40,11 +41,11 @@ export async function prepareCoinWallet(
   for (const lot of due) {
     wallet = { ...wallet, coins: wallet.coins - lot.remaining };
     await collections.coinLots(db).updateOne({ _id: lot._id }, { $set: { remaining: 0 } }, { session });
-    await collections.energyLedger(db).insertOne({
+    await appendLedger(db, session, {
       _id: randomUUID(), userId, kind: 'admin_adjust', reason: 'coin_expired', lotIds: [lot._id],
       coinsDelta: -lot.remaining, energyDelta: 0, resultingCoins: wallet.coins,
       resultingEnergy: wallet.energy, note: `${lot.remaining} Atomic Coins expired`, createdAt: now,
-    }, { session });
+    });
   }
   return wallet;
 }
