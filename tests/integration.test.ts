@@ -173,6 +173,34 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     return request('/notes/push', 'POST', { rows, requestId, mode }, token);
   };
 
+  await t.test('transaction history returns the newest 50 deterministically without deleting financial records', async () => {
+    const account = await user(), neighbour = await user();
+    // Prevent the read endpoint's legitimate daily grant from changing this fixture.
+    await collections.atomicUsers(db).updateOne({ _id: account.id }, { $set: { lastDailyGrantAt: new Date() } });
+    await collections.energyLedger(db).deleteMany({ userId: account.id });
+    const walletBefore = await collections.atomicUsers(db).findOne({ _id: account.id });
+    const neighbourBefore = await collections.energyLedger(db).find({ userId: neighbour.id }).toArray();
+    for (const size of [0, 49, 50, 51, 205]) {
+      await collections.energyLedger(db).deleteMany({ userId: account.id });
+      const entries = Array.from({ length: size }, (_, i) => ({
+        _id: `00000000-0000-4000-8000-${i.toString(16).padStart(12, '0')}`,
+        userId: account.id, kind: 'admin_adjust' as const, coinsDelta: 0, energyDelta: 1,
+        resultingCoins: 0, resultingEnergy: i, note: 'Synthetic history fixture',
+        // Ties deliberately cross the page boundary; insertion order is the opposite of ID order.
+        createdAt: new Date(1700000000000 + Math.floor(i / 3)),
+      }));
+      if (entries.length) await collections.energyLedger(db).insertMany(entries);
+      const response = await request('/energy', 'GET', undefined, account.token);
+      assert.equal(response.status, 200);
+      const body = await response.json() as { history: { id: string }[] };
+      assert.deepEqual(body.history.map((entry) => entry.id), entries.slice().reverse().slice(0, 50).map((entry) => entry._id));
+      assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id }), size,
+        'read limit must not perform retention cleanup');
+      assert.deepEqual(await collections.atomicUsers(db).findOne({ _id: account.id }), walletBefore);
+      assert.deepEqual(await collections.energyLedger(db).find({ userId: neighbour.id }).toArray(), neighbourBefore);
+    }
+  });
+
   await t.test('owner isolation, partial updates and failed pushes', async () => {
     const original = row(); assert.equal((await push([original])).status, 200);
     const before = writes;
