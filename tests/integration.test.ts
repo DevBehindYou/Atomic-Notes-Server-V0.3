@@ -279,6 +279,39 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.deepEqual((await ledgerArchives(db).findOne({ _id: account.id }))!.byKind, archive.byKind);
   });
 
+  await t.test('cleanup racing Controller credits preserves balances and snapshot statistics', async () => {
+    const { archiveLedgerBatch, readRetainedLedgerStatistics } = await import('../src/lib/ledgerRetention');
+    const account = await user(), now = Date.now();
+    await collections.energyLedger(db).insertMany(Array.from({ length: 100 }, () => ({
+      _id: randomUUID(), userId: account.id, kind: 'spend' as const, coinsDelta: 0, energyDelta: -5,
+      resultingCoins: 5, resultingEnergy: 0, note: 'Synthetic earlier spend', createdAt: new Date(now - 1000),
+    })));
+    const before = await readRetainedLedgerStatistics(db, account.id, now);
+    const wallet = (await collections.atomicUsers(db).findOne({ _id: account.id }))!;
+    const observations: Awaited<ReturnType<typeof readRetainedLedgerStatistics>>[] = [];
+    await Promise.all([
+      ...Array.from({ length: 5 }, () => request('/admin/energy', 'POST', {
+        user_id: account.id, coins_delta: 1, energy_delta: 0, request_id: randomUUID(),
+      }, undefined, 'test-admin-key').then(response => assert.equal(response.status, 200))),
+      ...Array.from({ length: 3 }, () => withTransaction(session => archiveLedgerBatch(db, account.id, session, now))),
+      (async () => { for (let i = 0; i < 8; i++) observations.push(await readRetainedLedgerStatistics(db, account.id, now)); })(),
+    ]);
+    await withTransaction(session => archiveLedgerBatch(db, account.id, session, now));
+    const after = await readRetainedLedgerStatistics(db, account.id, now);
+    assert.equal((await collections.atomicUsers(db).findOne({ _id: account.id }))!.coins, wallet.coins + 5);
+    assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id }), 50);
+    assert.equal(after.tx_24h, before.tx_24h + 5);
+    assert.equal(after.coins_granted_24h, before.coins_granted_24h + 5);
+    assert.equal(after.energy_spent_24h, before.energy_spent_24h);
+    assert.equal(after.ledger_by_kind.admin_adjust, (before.ledger_by_kind.admin_adjust ?? 0) + 5);
+    for (const view of observations) {
+      const credits = view.tx_24h - before.tx_24h;
+      assert.ok(credits >= 0 && credits <= 5);
+      assert.equal(view.coins_granted_24h - before.coins_granted_24h, credits);
+      assert.equal(view.energy_spent_24h, before.energy_spent_24h);
+    }
+  });
+
   await t.test('owner isolation, partial updates and failed pushes', async () => {
     const original = row(); assert.equal((await push([original])).status, 200);
     const before = writes;

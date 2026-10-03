@@ -43,14 +43,14 @@ export async function closeDb(): Promise<void> {
  * this is the Node-side replacement for what a Postgres SECURITY DEFINER
  * function got for free from being one transaction on the server.
  */
-export async function withTransaction<T>(fn: (session: import('mongodb').ClientSession) => Promise<T>): Promise<T> {
+export async function withTransaction<T>(fn: (session: import('mongodb').ClientSession) => Promise<T>, options: import('mongodb').TransactionOptions = {}): Promise<T> {
   await ensureConnected();
   const session = client.startSession();
   try {
     let result: T;
     await session.withTransaction(async () => {
       result = await fn(session);
-    });
+    }, options);
     return result!;
   } finally {
     await session.endSession();

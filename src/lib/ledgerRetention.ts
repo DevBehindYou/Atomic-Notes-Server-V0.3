@@ -1,6 +1,7 @@
 import type { ClientSession, Db } from 'mongodb';
+import { withTransaction } from '../db/mongo.js';
 import { collections } from '../db/collections.js';
-import { projectArchivedStatistics, type KindCounts, type RecentContribution, LEDGER_WINDOW_MS } from './ledgerStatistics.js';
+import { combineLedgerStatistics, projectArchivedStatistics, type KindCounts, type RecentContribution, LEDGER_WINDOW_MS } from './ledgerStatistics.js';
 
 type Archive = { _id: string; projectedAt: number; byKind: KindCounts };
 type Recent = RecentContribution & { _id: string; userId: string };
@@ -37,4 +38,15 @@ export async function archiveLedgerBatch(db: Db, userId: string, session: Client
   // Inclusive boundary stays present; expiry is derived, never allowed to affect lifetime totals.
   await ledgerRecent(db).deleteMany({ userId, at: { $lt: asOf - LEDGER_WINDOW_MS } }, { session });
   return rows.length;
+}
+
+/** Inactive reader: one snapshot spans retained rows and archived contributions. */
+export async function readRetainedLedgerStatistics(db: Db, userId: string, asOf: number) {
+  return withTransaction(async session => {
+    const retained = await collections.energyLedger(db).find({ userId }, { session }).toArray();
+    const archive = await ledgerArchives(db).findOne({ _id: userId }, { session });
+    const recent = await ledgerRecent(db).find({ userId, at: { $gte: asOf - LEDGER_WINDOW_MS } }, { session }).toArray();
+    return combineLedgerStatistics(retained, { userId, projectedAt: archive?.projectedAt ?? asOf,
+      byKind: archive?.byKind ?? {}, recent }, asOf);
+  }, { readConcern: { level: 'snapshot' } });
 }
