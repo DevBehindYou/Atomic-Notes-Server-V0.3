@@ -326,11 +326,12 @@ export async function energyRefund(db: Db, userId: string, amount: number, reaso
   });
 }
 
-export async function energyHistory(db: Db, userId: string, limit = 200) {
+/** User-visible history is bounded independently of financial-record retention. */
+export async function energyHistory(db: Db, userId: string) {
   return collections
     .energyLedger(db)
     .find({ userId })
-    .sort({ createdAt: -1 })
-    .limit(limit)
+    .sort({ createdAt: -1, _id: -1 })
+    .limit(50)
     .toArray();
 }

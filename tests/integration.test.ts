@@ -37,7 +37,7 @@ const { default: vault } = await import('../src/routes/vault');
 const { default: energyRoute } = await import('../src/routes/energy');
 const { default: profileRoute } = await import('../src/routes/atomicuser');
 const { default: auth, completeGoogleLogin } = await import('../src/routes/auth');
-const { beginSync, recordSyncResult, syncOperations } = await import('../src/lib/syncOperation');
+const { beginSync, finishSync, recordSyncResult, syncOperations } = await import('../src/lib/syncOperation');
 const { saveNoteMetadata } = await import('../src/lib/noteMetadata');
 const { decryptToken } = await import('../src/lib/crypto');
 const { remoteNoteRowSchema } = await import('../src/types/noteWire');
@@ -211,6 +211,34 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id }), count + 10);
     assert.deepEqual(entries.map(e => e.resultingCoins).sort((a, b) => a - b),
       Array.from({ length: 10 }, (_, i) => before.coins + i + 1));
+  });
+
+  await t.test('transaction history returns the newest 50 deterministically without deleting financial records', async () => {
+    const account = await user(), neighbour = await user();
+    // Prevent the read endpoint's legitimate daily grant from changing this fixture.
+    await collections.atomicUsers(db).updateOne({ _id: account.id }, { $set: { lastDailyGrantAt: new Date() } });
+    await collections.energyLedger(db).deleteMany({ userId: account.id });
+    const walletBefore = await collections.atomicUsers(db).findOne({ _id: account.id });
+    const neighbourBefore = await collections.energyLedger(db).find({ userId: neighbour.id }).toArray();
+    for (const size of [0, 49, 50, 51, 205]) {
+      await collections.energyLedger(db).deleteMany({ userId: account.id });
+      const entries = Array.from({ length: size }, (_, i) => ({
+        _id: `00000000-0000-4000-8000-${i.toString(16).padStart(12, '0')}`,
+        userId: account.id, kind: 'admin_adjust' as const, coinsDelta: 0, energyDelta: 1,
+        resultingCoins: 0, resultingEnergy: i, note: 'Synthetic history fixture',
+        // Ties deliberately cross the page boundary; insertion order is the opposite of ID order.
+        createdAt: new Date(1700000000000 + Math.floor(i / 3)),
+      }));
+      if (entries.length) await collections.energyLedger(db).insertMany(entries);
+      const response = await request('/energy', 'GET', undefined, account.token);
+      assert.equal(response.status, 200);
+      const body = await response.json() as { history: { id: string }[] };
+      assert.deepEqual(body.history.map((entry) => entry.id), entries.slice().reverse().slice(0, 50).map((entry) => entry._id));
+      assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id }), size,
+        'read limit must not perform retention cleanup');
+      assert.deepEqual(await collections.atomicUsers(db).findOne({ _id: account.id }), walletBefore);
+      assert.deepEqual(await collections.energyLedger(db).find({ userId: neighbour.id }).toArray(), neighbourBefore);
+    }
   });
 
   await t.test('owner isolation, partial updates and failed pushes', async () => {
@@ -473,6 +501,61 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
       assert.equal(await refundCount(account.id), 1);
     } finally { failTitle = ''; }
   });
+
+  for (const mode of ['standard', 'instant'] as const) {
+    for (const room of [0, 3]) {
+      await t.test(`refund receipt: ${mode} with ${room} energy room settles once and stays historical on replay`, async () => {
+        const account = await user(), requestId = randomUUID(), rows = [row()];
+        // Model a request that charged but died before committing a row. The
+        // Controller can credit the wallet while that operation is pending.
+        const operation = await beginSync(db, account.id, requestId,
+          rows.map((value) => remoteNoteRowSchema.parse(value)), mode);
+        const charged = mode === 'instant' ? 10 : 5;
+        assert.equal(operation.charged, charged);
+        const beforeGrant = await wallet(account.id);
+        const grant = await request('/admin/energy', 'POST', {
+          user_id: account.id, request_id: randomUUID(),
+          energy_delta: beforeGrant.energyCap - room - beforeGrant.energy,
+        }, undefined, 'test-admin-key');
+        assert.equal(grant.status, 200);
+        assert.equal((await wallet(account.id)).energy, beforeGrant.energyCap - room);
+
+        const [first, concurrent] = await Promise.all([
+          finishSync(db, operation), finishSync(db, operation),
+        ]);
+        assert.deepEqual(first, concurrent);
+        assert.equal(first.status, 'complete');
+        assert.deepEqual([first.charged, first.refunded], [charged, room]);
+        assert.equal(first.results[0].error, 'note_write_interrupted');
+        assert.equal((await wallet(account.id)).energy, beforeGrant.energyCap);
+        assert.equal((await wallet(account.id)).lastStandardSyncAt, null);
+        const refunds = await collections.energyLedger(db).find({ userId: account.id, note: /^Refund/ }).toArray();
+        assert.equal(refunds.length, room > 0 ? 1 : 0);
+        assert.equal(refunds.reduce((total, item) => total + item.energyDelta, 0), room);
+        assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id, kind: 'spend' }), 1);
+        assert.equal(await collections.notes(db).countDocuments({ userId: account.id }), 0);
+
+        // Room appearing later must not cause another refund or a larger
+        // historical receipt. Exercise replay through the actual HTTP route.
+        const lowered = await request('/admin/energy', 'POST', {
+          user_id: account.id, request_id: randomUUID(), energy_delta: -20,
+        }, undefined, 'test-admin-key');
+        assert.equal(lowered.status, 200);
+        const beforeReplay = await wallet(account.id), beforeWrites = writes;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const replay = await push(rows, account.token, requestId, mode);
+          assert.equal(replay.status, 502);
+          const body = await json(replay);
+          assert.deepEqual([body.charged, body.refunded], [charged, room]);
+          assert.deepEqual(body.results, first.results);
+          assert.equal((await wallet(account.id)).energy, beforeReplay.energy);
+          assert.equal(await refundCount(account.id), room > 0 ? 1 : 0);
+        }
+        assert.equal(writes, beforeWrites);
+        assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id, kind: 'spend' }), 1);
+      });
+    }
+  }
 
   await t.test('a partly successful batch keeps its charge', async () => {
     const account = await user();
