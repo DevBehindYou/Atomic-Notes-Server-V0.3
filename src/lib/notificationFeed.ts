@@ -79,10 +79,20 @@ async function reachFilter(db: Db, userId: string, now: Date) {
 
 export type FeedItem = { notification: NotificationDoc; state: NotificationStateDoc | null };
 
-/** What [userId] sees, newest first: reachable, in the version range and not dismissed. */
+/**
+ * What [userId] sees: eligible pinned notices reserve slots before ordinary notices.
+ * Each candidate group remains bounded; selected rows are returned newest first.
+ */
 export async function feedFor(db: Db, userId: string, appVersion?: string | null, now = new Date()): Promise<FeedItem[]> {
-  const candidates = await collections.notifications(db).find(await reachFilter(db, userId, now))
-    .sort({ createdAt: -1 }).limit(FEED_LIMIT * 2).toArray();
+  const filter = await reachFilter(db, userId, now);
+  const notifications = collections.notifications(db);
+  // Separate bounded queries prevent ordinary traffic from consuming the pin
+  // candidate window. Missing legacy dismissible fields remain ordinary.
+  const [pinned, ordinary] = await Promise.all([
+    notifications.find({ ...filter, dismissible: false }).sort({ createdAt: -1 }).limit(FEED_LIMIT * 2).toArray(),
+    notifications.find({ ...filter, dismissible: { $ne: false } }).sort({ createdAt: -1 }).limit(FEED_LIMIT * 2).toArray(),
+  ]);
+  const candidates = [...pinned, ...ordinary];
   const inRange = candidates.filter((n) => versionAllows(n, appVersion));
   const states = await collections.notificationStates(db)
     .find({ userId, notificationId: { $in: inRange.map((n) => n._id) } }).toArray();
@@ -90,6 +100,7 @@ export async function feedFor(db: Db, userId: string, appVersion?: string | null
   return inRange
     .filter((n) => !byId.get(n._id)?.dismissedAt)
     .slice(0, FEED_LIMIT)
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
     .map((n) => ({ notification: n, state: byId.get(n._id) ?? null }));
 }
 

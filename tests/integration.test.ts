@@ -1366,6 +1366,47 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal(await collections.notificationStates(db).countDocuments({ notificationId: active.id }), 0);
   });
 
+  for (const traffic of [60, 120]) {
+    await t.test(`R15 pinned notices survive ${traffic} newer ordinary notices`, async () => {
+      const reader = await user();
+      const { notificationSchema } = await import('../src/db/collections');
+      const now = Date.now();
+      const pinned = notificationSchema.parse({
+        _id: randomUUID(), type: 'general', subject: 'Required update', description: 'fixture',
+        targetUserId: reader.id, dismissible: false, createdAt: new Date(now - 86400000),
+      });
+      const ordinary = Array.from({ length: traffic }, (_, index) => notificationSchema.parse({
+        _id: randomUUID(), type: 'general', subject: `ordinary ${index}`, description: 'fixture',
+        targetUserId: reader.id, createdAt: new Date(now + 60000 + index),
+      }));
+      const fixtures = [pinned, ...ordinary];
+      await collections.notifications(db).insertMany(fixtures);
+      try {
+        const start = mongoCommands.started;
+        const response = await request('/notifications?app_version=2.03.9', 'GET', undefined, reader.token);
+        const commands = mongoCommands.started - start;
+        assert.equal(response.status, 200);
+        const rows = (await json(response)).rows as { id: string; is_read: boolean; created_at: string }[];
+        console.log('NOTIFICATION_BUDGET', JSON.stringify({ traffic, commands, rows: rows.length }));
+        assert.equal(rows.length, 50, 'response stays bounded');
+        assert.ok(rows.some((n) => n.id === pinned._id), 'new ordinary traffic cannot evict an active pin');
+        assert.ok(rows.some((n) => n.id === ordinary.at(-1)!._id), 'newest ordinary notice remains visible');
+        assert.deepEqual(rows.map((n) => n.created_at), rows.map((n) => n.created_at).sort().reverse());
+        assert.ok(commands <= 6, `notification feed command budget: ${commands}`);
+        const readAll = await request('/notifications/read-all?app_version=2.03.9', 'POST', undefined, reader.token);
+        assert.equal(readAll.status, 200);
+        assert.ok((await collections.notificationStates(db).findOne({ userId: reader.id, notificationId: pinned._id }))?.readAt);
+        assert.equal((await request(`/notifications/${pinned._id}/dismiss`, 'POST', undefined, reader.token)).status, 409);
+        await collections.notifications(db).updateOne({ _id: pinned._id }, { $set: { status: 'resolved' } });
+        const resolvedFeed = (await json(await request('/notifications', 'GET', undefined, reader.token))).rows as { id: string }[];
+        assert.ok(!resolvedFeed.some((n) => n.id === pinned._id), 'resolved pin leaves the feed');
+      } finally {
+        await collections.notifications(db).deleteMany({ _id: { $in: fixtures.map((n) => n._id) } });
+        await collections.notificationStates(db).deleteMany({ userId: reader.id });
+      }
+    });
+  }
+
   await t.test('failed republication cannot extend an existing notification audience', async () => {
     const recipient = await user();
     const id = randomUUID();
