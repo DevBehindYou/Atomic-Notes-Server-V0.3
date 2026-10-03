@@ -320,6 +320,72 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
   const json = async (response: Response) => await response.json() as any;
   const refundCount = (id: string) => collections.energyLedger(db).countDocuments({ userId: id, note: /^Refund/ });
 
+  await t.test('R27 admin notification pages are bounded and keep equal-time rows', async () => {
+    const { notificationSchema } = await import('../src/db/collections');
+    const original = await collections.notifications(db).find({}).toArray();
+    const fixtures = Array.from({ length: 131 }, (_, i) => notificationSchema.parse({
+      _id: randomUUID(), type: 'general', subject: `page ${i}`, description: 'fixture',
+      status: (['active', 'resolved', 'expired'] as const)[i % 3],
+      createdAt: new Date(i < 67 ? '2050-01-02T00:00:00.000Z' : '2050-01-01T00:00:00.000Z'),
+    }));
+    await collections.notifications(db).insertMany(fixtures);
+    const list = async (query = '') => {
+      const response = await request(`/admin/notifications${query}`, 'GET', undefined, undefined, 'test-admin-key');
+      assert.equal(response.status, 200);
+      return json(response) as Promise<{ rows: { id: string; reads: number; recipients: number | null }[]; next_cursor: string | null }>;
+    };
+    try {
+      const first = await list();
+      assert.equal(first.rows.length, 50, 'default page must not materialize all notification history');
+      assert.equal(typeof first.next_cursor, 'string');
+      assert.ok(first.rows.every((n) => n.reads === 0 && n.recipients === null));
+      const expected = [...original, ...fixtures].sort((a, b) =>
+        b.createdAt.getTime() - a.createdAt.getTime() || (a._id < b._id ? 1 : a._id > b._id ? -1 : 0));
+      const seen: string[] = [];
+      let cursor: string | null = null;
+      do {
+        const page = await list(`?limit=17${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+        assert.ok(page.rows.length <= 17);
+        seen.push(...page.rows.map((n) => n.id));
+        cursor = page.next_cursor;
+        assert.ok(seen.length <= expected.length, 'cursor must make forward progress');
+      } while (cursor);
+      assert.deepEqual(seen, expected.map((n) => n._id));
+      assert.equal(new Set(seen).size, seen.length);
+    } finally {
+      await collections.notifications(db).deleteMany({ _id: { $in: fixtures.map((n) => n._id) } });
+    }
+  });
+
+  await t.test('R27 admin pagination validates input after authorization', async () => {
+    assert.equal((await request('/admin/notifications?cursor=not-json')).status, 401);
+    for (const query of ['?limit=0', '?limit=51', '?limit=-1', '?limit=1.5', '?limit=abc',
+      '?cursor=not-json', `?cursor=${'x'.repeat(513)}`,
+      `?cursor=${Buffer.from(JSON.stringify({ created_at: 'invalid', id: randomUUID() })).toString('base64url')}`]) {
+      assert.equal((await request(`/admin/notifications${query}`, 'GET', undefined, undefined, 'test-admin-key')).status, 400, query);
+    }
+  });
+
+  await t.test('R27 admin cursor survives deletion of the page boundary', async () => {
+    const { notificationSchema } = await import('../src/db/collections');
+    const fixtures = Array.from({ length: 3 }, (_, i) => notificationSchema.parse({
+      _id: randomUUID(), type: 'general', subject: `boundary ${i}`, description: 'fixture',
+      createdAt: new Date('2051-01-01T00:00:00.000Z'),
+    }));
+    fixtures.sort((a, b) => a._id < b._id ? 1 : -1);
+    await collections.notifications(db).insertMany(fixtures);
+    try {
+      const first = await json(await request('/admin/notifications?limit=1', 'GET', undefined, undefined, 'test-admin-key'));
+      assert.equal(first.rows[0].id, fixtures[0]._id);
+      assert.equal(typeof first.next_cursor, 'string');
+      await collections.notifications(db).deleteOne({ _id: first.rows[0].id });
+      const next = await json(await request(`/admin/notifications?limit=1&cursor=${encodeURIComponent(first.next_cursor)}`, 'GET', undefined, undefined, 'test-admin-key'));
+      assert.equal(next.rows[0].id, fixtures[1]._id);
+    } finally {
+      await collections.notifications(db).deleteMany({ _id: { $in: fixtures.map((n) => n._id) } });
+    }
+  });
+
   await t.test('a finished request is replayed from its record even when quota and Google state changed', async () => {
     const account = await user(), requestId = randomUUID(), rows = [row()];
     const first = await push(rows, account.token, requestId);
