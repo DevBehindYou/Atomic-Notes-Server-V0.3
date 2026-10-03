@@ -301,3 +301,61 @@ test('coin policy is inactive by default and requires an unambiguous activation 
     else process.env.COIN_EXPIRY_ACTIVATED_AT = previous;
   }
 });
+
+
+// Independent full-ledger oracle for the proposed retention statistics projection.
+import { projectArchivedStatistics, combineLedgerStatistics, LEDGER_WINDOW_MS } from '../src/lib/ledgerStatistics';
+import type { EnergyLedgerDoc } from '../src/db/collections';
+const statsTime = Date.parse('2026-10-03T12:00:00.000Z');
+function statisticsFixture(count: number): EnergyLedgerDoc[] {
+  const kinds: EnergyLedgerDoc['kind'][] = ['daily_grant', 'convert', 'spend', 'purchase', 'admin_adjust'];
+  return Array.from({ length: count }, (_, i) => ({ _id: `fixture-${i}`, userId: 'fixture-owner',
+    kind: kinds[i % kinds.length], coinsDelta: i % 3 === 0 ? 5 : -2, energyDelta: i % 2 ? -10 : 20,
+    resultingCoins: 50, resultingEnergy: 100, note: 'Not retained in statistics',
+    createdAt: new Date(statsTime - Math.floor(i / 3) * 1000) }));
+}
+function fullLedgerOracle(rows: EnergyLedgerDoc[], at: number) {
+  const result = { tx_24h: 0, coins_granted_24h: 0, energy_spent_24h: 0,
+    ledger_by_kind: {} as Record<string, number> };
+  for (const row of rows) {
+    result.ledger_by_kind[row.kind] = (result.ledger_by_kind[row.kind] ?? 0) + 1;
+    if (row.createdAt.getTime() >= at - 86400000) {
+      result.tx_24h++;
+      if (row.coinsDelta > 0) result.coins_granted_24h += row.coinsDelta;
+      if (row.energyDelta < 0) result.energy_spent_24h -= row.energyDelta;
+    }
+  }
+  return result;
+}
+for (const size of [0, 49, 50, 51, 1000, 10000]) {
+  test(`retention statistics equal full ledger after keeping 50 of ${size} entries`, () => {
+    const rows = statisticsFixture(size), keep = rows.slice(0, 50), remove = rows.slice(50);
+    const archived = projectArchivedStatistics('fixture-owner', remove, statsTime);
+    for (const at of [statsTime, statsTime + 1000, statsTime + LEDGER_WINDOW_MS, statsTime + LEDGER_WINDOW_MS + 1]) {
+      assert.deepEqual(combineLedgerStatistics(keep, archived, at), fullLedgerOracle(rows, at));
+    }
+    assert.equal(JSON.stringify(archived).includes('Not retained'), false);
+    assert.equal(JSON.stringify(archived).includes('resultingCoins'), false);
+  });
+}
+test('statistics preserve inclusive millisecond cutoff, ties and future legacy timestamps', () => {
+  const rows = statisticsFixture(5);
+  const times = [statsTime - LEDGER_WINDOW_MS - 1, statsTime - LEDGER_WINDOW_MS,
+    statsTime - LEDGER_WINDOW_MS + 1, statsTime - LEDGER_WINDOW_MS, statsTime + 1000];
+  rows.forEach((row, i) => { row.createdAt = new Date(times[i]); });
+  const archived = projectArchivedStatistics('fixture-owner', rows, statsTime);
+  assert.equal(archived.recent.length, 3);
+  assert.deepEqual(combineLedgerStatistics([], archived, statsTime), fullLedgerOracle(rows, statsTime));
+  assert.deepEqual(combineLedgerStatistics([], archived, statsTime + 1), fullLedgerOracle(rows, statsTime + 1));
+});
+test('statistics reject mixed owners, duplicate rows and invalid dates', () => {
+  const rows = statisticsFixture(1);
+  assert.throws(() => projectArchivedStatistics('different-owner', rows, statsTime), /owner_mismatch/);
+  assert.throws(() => projectArchivedStatistics('fixture-owner', [rows[0], rows[0]], statsTime), /duplicate/);
+  assert.throws(() => projectArchivedStatistics('fixture-owner', [{ ...rows[0], createdAt: new Date(NaN) }], statsTime), /invalid_statistics_time/);
+});
+
+test('statistics refuse historical queries older than their projection', () => {
+  const archived = projectArchivedStatistics('fixture-owner', statisticsFixture(2), statsTime);
+  assert.throws(() => combineLedgerStatistics([], archived, statsTime - 1), /statistics_time_regression/);
+});
