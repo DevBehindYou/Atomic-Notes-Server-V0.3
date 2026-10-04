@@ -2491,5 +2491,83 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     }
   });
 
+  await t.test('ordered migration commits final cleanup, backfill and checkpoint together across failures', async () => {
+    const { rehearseLedgerMigration } = await import('./ledgerMigrationHarness');
+    const { readRetainedLedgerStatistics } = await import('../src/lib/ledgerRetention');
+    const accounts = [await user(), await user()], at = Date.now();
+    for (const [index, account] of accounts.entries()) {
+      await collections.energyLedger(db).deleteMany({ userId: account.id });
+      await collections.energyLedger(db).insertMany(Array.from({ length: index === 0 ? 151 : 150 }, () => ({
+        _id: randomUUID(), userId: account.id, kind: 'admin_adjust' as const, coinsDelta: 0, energyDelta: 0,
+        resultingCoins: 5, resultingEnergy: 0, note: 'Ordered migration fixture', createdAt: new Date(at - 1000),
+      })));
+    }
+    const options = { expectedDatabase: databaseName, runId: randomUUID(), users: accounts.map(account => account.id),
+      asOf: at, batchBudget: 1, initializeSequences: true };
+    await assert.rejects(() => rehearseLedgerMigration(db, { ...options,
+      afterCommit: async () => { throw new Error('fixture_lost_cleanup_response'); } }), /lost_cleanup_response/);
+    assert.equal(await collections.energyLedger(db).countDocuments({ userId: accounts[0].id }), 51);
+    assert.equal((await collections.atomicUsers(db).findOne({ _id: accounts[0].id }))!.historyRetentionVersion, undefined);
+    assert.equal((await request('/admin/energy', 'POST', { user_id: accounts[0].id, coins_delta: 0,
+      energy_delta: 1, request_id: randomUUID() }, undefined, 'test-admin-key')).status, 200);
+    const totals = await Promise.all(accounts.map(account => readRetainedLedgerStatistics(db, account.id, at)));
+    const checkpoint = await db.collection('test_ledger_migration_progress').findOne({ _id: options.runId } as any);
+    const wallet = await collections.atomicUsers(db).findOne({ _id: accounts[0].id });
+    const rows = await collections.energyLedger(db).find({ userId: accounts[0].id }).sort({ _id: 1 }).toArray();
+    assert.equal(rows.length, 52);
+    await assert.rejects(() => rehearseLedgerMigration(db, { ...options, initializeSequences: false }), /plan_mismatch/);
+    const failingDb = new Proxy(db, {
+      get(target, property) {
+        if (property === 'collection') return (name: string) => {
+          const collection = target.collection(name);
+          return new Proxy(collection, {
+            get(current, method) {
+              if (name === 'energy_ledger' && method === 'updateOne') return async (...args: any[]) => {
+                const result = await (current.updateOne as any)(...args);
+                if (args[0].userId === accounts[0].id && args[1].$set?.historySequence) {
+                  throw new Error('fixture_abort_during_backfill');
+                }
+                return result;
+              };
+              const value = Reflect.get(current, method);
+              return typeof value === 'function' ? value.bind(current) : value;
+            },
+          });
+        };
+        const value = Reflect.get(target, property);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as Db;
+    await assert.rejects(() => rehearseLedgerMigration(failingDb, options), /abort_during_backfill/);
+    assert.deepEqual(await collections.atomicUsers(db).findOne({ _id: accounts[0].id }), wallet);
+    assert.deepEqual(await collections.energyLedger(db).find({ userId: accounts[0].id }).sort({ _id: 1 }).toArray(), rows);
+    assert.deepEqual(await db.collection('test_ledger_migration_progress').findOne({ _id: options.runId } as any), checkpoint);
+    assert.deepEqual(await readRetainedLedgerStatistics(db, accounts[0].id, at), totals[0]);
+    await assert.rejects(() => rehearseLedgerMigration(db, { ...options,
+      afterCommit: async () => { throw new Error('fixture_lost_activation_response'); } }), /lost_activation_response/);
+    assert.equal((await collections.atomicUsers(db).findOne({ _id: accounts[0].id }))!.historyRetentionVersion, 1);
+    assert.equal((await db.collection('test_ledger_migration_progress').findOne({ _id: options.runId } as any))!.accountOffset, 1);
+    await Promise.all([rehearseLedgerMigration(db, { ...options, batchBudget: 3 }),
+      rehearseLedgerMigration(db, { ...options, batchBudget: 3 })]);
+    const completed = await rehearseLedgerMigration(db, options);
+    assert.equal(completed.completed, true); assert.equal(completed.removed, 202);
+    for (const [index, account] of accounts.entries()) {
+      const current = (await collections.atomicUsers(db).findOne({ _id: account.id }))!;
+      assert.equal(current.historyRetentionVersion, 1); assert.equal(current.historySequence, 50);
+      assert.equal(current.coins, 5); assert.equal(current.energy, index === 0 ? 1 : 0);
+      assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id }), 50);
+      assert.deepEqual(await readRetainedLedgerStatistics(db, account.id, at), totals[index]);
+    }
+    const doneWallet = await collections.atomicUsers(db).findOne({ _id: accounts[0].id });
+    assert.deepEqual(await rehearseLedgerMigration(db, options), completed);
+    assert.deepEqual(await collections.atomicUsers(db).findOne({ _id: accounts[0].id }), doneWallet);
+    assert.equal((await request('/admin/energy', 'POST', { user_id: accounts[0].id, coins_delta: 0,
+      energy_delta: 1, request_id: randomUUID() }, undefined, 'test-admin-key')).status, 200);
+    const next = (await collections.atomicUsers(db).findOne({ _id: accounts[0].id }))!;
+    assert.equal(next.energy, 2); assert.equal(next.historySequence, 51);
+    assert.equal(await collections.energyLedger(db).countDocuments({ userId: accounts[0].id }), 50);
+    assert.deepEqual(await rehearseLedgerMigration(db, options), completed);
+    assert.deepEqual(await collections.atomicUsers(db).findOne({ _id: accounts[0].id }), next);
+  });
 
 });

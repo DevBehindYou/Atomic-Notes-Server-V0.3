@@ -1,0 +1,9 @@
+# Ordered account migration rehearsal
+
+This extends only the disposable test harness. It has no production command, account enumeration, deployment hook or index build. It still refuses every database except the generated atomic_test_<20 hex> database and accepts at most five explicit fixture accounts and ten batches per invocation.
+
+An explicit initializeSequences option is included in the immutable checkpoint fingerprint. When the final batch removes fewer than 100 rows, cleanup, sequence backfill, account marking and checkpoint advancement commit together. A batch that removes exactly 100 rows does not declare completion; the next bounded batch must confirm the account is ready. The default remains cleanup-only for the earlier rehearsal.
+
+Contract proof uses 151 and 150 history rows. A lost first-cleanup response leaves its committed checkpoint intact; a real legacy energy credit then adds a row. An injected error after the first sequence update must roll back final cleanup, partial backfill, wallet revision and checkpoint. A lost final-activation response must preserve the committed account marker and advanced checkpoint. Parallel resumptions must finish with 50 ordered rows per account, exactly 202 removals, unchanged coins, the credited energy and exact historical totals. Repeated completed runs, including after a later automatic grant, must not reassign/reset sequences or mutate the wallet. Changing initialization mode on the same checkpoint is refused.
+
+These are characterization tests of the staged contract, not evidence of a deployed migration failure. Their result belongs to the exact CI head. Production preflight, invalid/orphan quarantine, index review, backup restoration, exclusion of old writers and explicit approval remain required. A test fixture may opt in directly; that is not a production activation path.
