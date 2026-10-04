@@ -2107,4 +2107,88 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     }
   });
 
+  await t.test('active retention preserves every economy path and replay after automatic eviction', async (et) => {
+    const { initializeLedgerSequence } = await import('../src/lib/ledgerSequence');
+    const { archiveLedgerBatch, readRetainedLedgerStatistics } = await import('../src/lib/ledgerRetention');
+    const { energyUpgradeNoteLimit } = await import('../src/lib/energy');
+    const { prepareCoinWallet } = await import('../src/lib/coinLots');
+    const account = await user(); // Before activation: five opening coins are grandfathered.
+    const previousPolicy = process.env.COIN_EXPIRY_ACTIVATED_AT;
+    et.after(() => { if (previousPolicy === undefined) delete process.env.COIN_EXPIRY_ACTIVATED_AT; else process.env.COIN_EXPIRY_ACTIVATED_AT = previousPolicy; });
+    await collections.energyLedger(db).insertMany(Array.from({ length: 50 }, () => ({ _id: randomUUID(),
+      userId: account.id, kind: 'admin_adjust' as const, coinsDelta: 0, energyDelta: 0,
+      resultingCoins: 5, resultingEnergy: 0, note: 'Active retention fixture', createdAt: new Date() })));
+    await withTransaction(async session => {
+      await archiveLedgerBatch(db, account.id, session, Date.now());
+      await initializeLedgerSequence(db, account.id, session);
+    });
+    process.env.COIN_EXPIRY_ACTIVATED_AT = '2026-01-01T00:00:00.000Z';
+    const adjust = (coins: number, requestId: string) => request('/admin/energy', 'POST', {
+      user_id: account.id, coins_delta: coins, energy_delta: 0, request_id: requestId,
+    }, undefined, 'test-admin-key');
+    const creditIds = [randomUUID(), randomUUID()], convertId = randomUUID(), capacityId = randomUUID();
+    for (const id of creditIds) assert.equal((await adjust(100, id)).status, 200);
+    await energyUpgradeNoteLimit(db, account.id, 30, capacityId);
+    await energyGrantDaily(db, account.id);
+    await energyConvert(db, account.id, 1, convertId);
+    const successfulRows = [row()], failedRows = [row({ title: 'FAIL' })];
+    const successId = randomUUID(), failureId = randomUUID();
+    assert.equal((await push(successfulRows, account.token, successId, 'instant')).status, 200);
+    const failure = await push(failedRows, account.token, failureId, 'instant');
+    assert.equal(failure.status, 502);
+    const failedReceipt = await failure.json() as { charged: number; refunded: number };
+    assert.deepEqual([failedReceipt.charged, failedReceipt.refunded], [10, 10]);
+    let wallet = (await collections.atomicUsers(db).findOne({ _id: account.id }))!;
+    assert.equal(wallet.coins, 194); assert.equal(wallet.energy, 50); assert.equal(wallet.noteLimit, 40);
+    assert.equal(wallet.historySequence, 58);
+    const lotsBefore = await collections.coinLots(db).find({ userId: account.id }).toArray();
+    const expiring = lotsBefore.filter(lot => lot.source === 'controller');
+    assert.equal(expiring.length, 2); assert.equal(expiring.reduce((sum, lot) => sum + lot.remaining, 0), 189);
+    const expiryAt = new Date(Math.max(...expiring.map(lot => lot.expiresAt!.getTime())));
+    const expire = () => withTransaction(async session => {
+      const current = (await collections.atomicUsers(db).findOne({ _id: account.id }, { session }))!;
+      await prepareCoinWallet(db, current, session, expiryAt);
+    });
+    await Promise.all([expire(), expire()]);
+    wallet = (await collections.atomicUsers(db).findOne({ _id: account.id }))!;
+    assert.equal(wallet.coins, 5); assert.equal(wallet.energy, 50); assert.equal(wallet.historySequence, 60);
+    assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id }), 50);
+    assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id, reason: 'coin_expired' }), 2);
+    const originalOperations = await collections.coinOperations(db).find({ userId: account.id }).sort({ _id: 1 }).toArray();
+    // Zero adjustments go through the real Controller route; sequences evict even future-dated expiry events.
+    for (let i = 0; i < 60; i++) assert.equal((await adjust(0, randomUUID())).status, 200);
+    assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id }), 50);
+    assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id, reason: 'coin_expired' }), 0);
+    assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id, kind: { $in: ['spend', 'convert', 'purchase', 'daily_grant'] } }), 0);
+    const beforeReplay = (await collections.atomicUsers(db).findOne({ _id: account.id }))!;
+    const lotsAtReplay = await collections.coinLots(db).find({ userId: account.id }).sort({ _id: 1 }).toArray();
+    const commands = writes;
+    for (const id of creditIds) assert.equal((await adjust(100, id)).status, 200);
+    await Promise.all([energyConvert(db, account.id, 1, convertId), energyConvert(db, account.id, 1, convertId)]);
+    await energyUpgradeNoteLimit(db, account.id, 30, capacityId);
+    for (let i = 0; i < 2; i++) {
+      assert.equal((await push(successfulRows, account.token, successId, 'instant')).status, 200);
+      const replay = await push(failedRows, account.token, failureId, 'instant');
+      assert.equal(replay.status, 502);
+      assert.deepEqual(await replay.json(), failedReceipt);
+    }
+    await Promise.all([expire(), expire()]);
+    await energyGrantDaily(db, account.id); // No new grant is due.
+    const afterReplay = (await collections.atomicUsers(db).findOne({ _id: account.id }))!;
+    assert.deepEqual(afterReplay, beforeReplay);
+    assert.equal(writes, commands);
+    assert.deepEqual(await collections.coinLots(db).find({ userId: account.id }).sort({ _id: 1 }).toArray(), lotsAtReplay);
+    for (const operation of originalOperations) assert.deepEqual(await collections.coinOperations(db).findOne({ _id: operation._id }), operation);
+    const totals = await readRetainedLedgerStatistics(db, account.id, Date.now());
+    assert.equal(totals.ledger_by_kind.spend, 2); assert.equal(totals.ledger_by_kind.convert, 1);
+    assert.equal(totals.ledger_by_kind.purchase, 1); assert.equal(totals.ledger_by_kind.daily_grant, 1);
+    assert.equal(totals.energy_spent_24h, 20); assert.equal(totals.coins_granted_24h, 205);
+    assert.equal(afterReplay.historySequence, 120);
+    assert.equal((await collections.coinLots(db).findOne({ userId: account.id, source: 'legacy' }))!.remaining, 5);
+    const state = await request('/energy', 'GET', undefined, account.token);
+    assert.equal(state.status, 200);
+    const body = await state.json() as { history: unknown[] };
+    assert.equal(body.history.length, 50);
+  });
+
 });
