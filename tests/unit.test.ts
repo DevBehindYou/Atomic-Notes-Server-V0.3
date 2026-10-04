@@ -359,3 +359,11 @@ test('statistics refuse historical queries older than their projection', () => {
   const archived = projectArchivedStatistics('fixture-owner', statisticsFixture(2), statsTime);
   assert.throws(() => combineLedgerStatistics([], archived, statsTime - 1), /statistics_time_regression/);
 });
+
+import { ledgerInspectionArguments } from '../src/db/ledgerRetentionInspection';
+test('ledger history inspection has no apply mode and refuses every unknown argument', () => {
+  assert.equal(ledgerInspectionArguments([]), undefined);
+  for (const args of [['--apply'], ['--apply', '--database', 'fixture'], ['--force'], ['--limit', '100'], ['--database', 'fixture']]) {
+    assert.throws(() => ledgerInspectionArguments(args), /inspection only/);
+  }
+});

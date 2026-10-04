@@ -1803,6 +1803,7 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     await collections.atomicUsers(db).updateOne({ _id: legacy.id }, { $set: { coins: 40 } });
     const zero = await user();
     await collections.atomicUsers(db).updateOne({ _id: zero.id }, { $set: { coins: 0 } });
+    const evictionAccount = await user(); // Before activation: opening coins remain non-expiring.
     const priorLedger = await collections.energyLedger(db).countDocuments({ userId: legacy.id });
     process.env.COIN_EXPIRY_ACTIVATED_AT = '2026-01-01T00:00:00.000Z';
     ct.after(() => { delete process.env.COIN_EXPIRY_ACTIVATED_AT; });
@@ -1891,6 +1892,59 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
       assert.equal((await wallet(account.id)).noteLimit, 30);
       await reconcile(account.id);
     });
+    await ct.test('credit and conversion replay plus expiry survive eviction of their history rows', async () => {
+      const { archiveLedgerBatch } = await import('../src/lib/ledgerRetention');
+      const id = evictionAccount.id, creditId = randomUUID(), conversionId = randomUUID();
+      assert.equal((await adjust(id, 50, creditId)).status, 200);
+      await energyConvert(db, id, 1, conversionId);
+      const beforeWallet = await wallet(id), beforeLots = await lots(id);
+      const beforeOperations = await collections.coinOperations(db).find({ userId: id }).sort({ _id: 1 }).toArray();
+      const originalHistory = await collections.energyLedger(db).find({ userId: id }).toArray();
+      const credit = beforeLots.find(lot => lot.source === 'controller')!;
+      const legacyLot = beforeLots.find(lot => lot.source === 'legacy')!;
+      assert.equal(credit.remaining, 49); assert.equal(legacyLot.remaining, 5);
+      assert.equal(legacyLot.expiresAt, null);
+      assert.equal(credit.expiresAt!.toISOString(), coinExpiry(credit.creditedAt).toISOString());
+      const evict = async (newerThan: number) => {
+        await collections.energyLedger(db).insertMany(Array.from({ length: 60 }, () => ({
+          _id: randomUUID(), userId: id, kind: 'admin_adjust' as const, coinsDelta: 0, energyDelta: 0,
+          resultingCoins: 0, resultingEnergy: 0, note: 'Synthetic newer history', createdAt: new Date(newerThan + 1000),
+        })));
+        while (await withTransaction(session => archiveLedgerBatch(db, id, session, Date.now()))) { /* bounded batches */ }
+      };
+      await evict(Date.now());
+      assert.equal(await collections.energyLedger(db).countDocuments({ _id: { $in: originalHistory.map(row => row._id) } }), 0);
+      assert.deepEqual(await lots(id), beforeLots);
+      assert.deepEqual(await collections.coinOperations(db).find({ userId: id }).sort({ _id: 1 }).toArray(), beforeOperations);
+      const replays = await Promise.all([adjust(id, 50, creditId), adjust(id, 50, creditId)]);
+      assert.ok(replays.every(response => response.status === 200));
+      await Promise.all([energyConvert(db, id, 1, conversionId), energyConvert(db, id, 1, conversionId)]);
+      assert.equal((await adjust(id, 51, creditId)).status, 409);
+      await assert.rejects(energyConvert(db, id, 2, conversionId), /coin_request_mismatch/);
+      assert.deepEqual(await lots(id), beforeLots);
+      assert.equal((await wallet(id)).coins, beforeWallet.coins);
+      assert.equal((await wallet(id)).energy, beforeWallet.energy);
+      assert.equal((await wallet(id)).noteLimit, beforeWallet.noteLimit);
+      assert.deepEqual(await collections.coinOperations(db).find({ userId: id }).sort({ _id: 1 }).toArray(), beforeOperations);
+      const expire = () => withTransaction(async session => {
+        const current = (await collections.atomicUsers(db).findOne({ _id: id }, { session }))!;
+        await prepareCoinWallet(db, current, session, credit.expiresAt!);
+      });
+      await Promise.all([expire(), expire()]);
+      assert.equal((await wallet(id)).coins, 5);
+      assert.equal((await wallet(id)).energy, beforeWallet.energy);
+      assert.equal((await lots(id)).find(lot => lot._id === legacyLot._id)!.remaining, 5);
+      assert.equal((await lots(id)).find(lot => lot._id === credit._id)!.remaining, 0);
+      assert.equal(await collections.energyLedger(db).countDocuments({ userId: id, reason: 'coin_expired' }), 1);
+      await evict(credit.expiresAt!.getTime());
+      assert.equal(await collections.energyLedger(db).countDocuments({ userId: id, reason: 'coin_expired' }), 0);
+      await Promise.all([expire(), expire()]);
+      assert.equal((await wallet(id)).coins, 5);
+      assert.equal(await collections.energyLedger(db).countDocuments({ userId: id, reason: 'coin_expired' }), 0);
+      assert.equal((await lots(id)).find(lot => lot._id === credit._id)!.expiresAt!.getTime(), credit.expiresAt!.getTime());
+      await reconcile(id);
+    });
+
     await ct.test('parallel spends cannot use one coin twice; expired balances never authorize spending', async () => {
       assert.equal((await adjust(zero.id, 1)).status, 200);
       const outcomes = await Promise.allSettled([energyConvert(db, zero.id, 1, randomUUID()), energyConvert(db, zero.id, 1, randomUUID())]);
@@ -2336,5 +2390,106 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
       assert.equal(await col.countDocuments({ userId: legacy.id }), legacyBefore);
     } finally { await col.dropIndex(indexName); }
   });
+
+  await t.test('retention inspection reports over-limit and orphan rows without changing data or indexes', async () => {
+    const { inspectLedgerRetention } = await import('../src/db/ledgerRetentionInspection');
+    const baseline = await inspectLedgerRetention(db);
+    const account = await user(), orphanId = randomUUID();
+    await collections.energyLedger(db).deleteMany({ userId: account.id });
+    const entry = (userId: string) => ({ _id: randomUUID(), userId, kind: 'admin_adjust' as const,
+      coinsDelta: 0, energyDelta: 0, resultingCoins: 0, resultingEnergy: 0, note: 'Private fixture text', createdAt: new Date() });
+    await collections.energyLedger(db).insertMany([...Array.from({ length: 51 }, () => entry(account.id)), ...Array.from({ length: 3 }, () => entry(orphanId))]);
+    const before = await collections.energyLedger(db).find({}).sort({ _id: 1 }).toArray();
+    const names = await db.listCollections({}, { nameOnly: true }).toArray();
+    const indexes = await collections.energyLedger(db).indexes();
+    const wallet = await collections.atomicUsers(db).findOne({ _id: account.id });
+    const result = await inspectLedgerRetention(db);
+    assert.equal(result.rows, baseline.rows + 54);
+    assert.equal(result.accounts, baseline.accounts + 2);
+    assert.equal(result.removableRows, baseline.removableRows + 1);
+    assert.equal(result.overLimitAccounts, baseline.overLimitAccounts + 1);
+    assert.equal(result.orphanRows, baseline.orphanRows + 3);
+    assert.equal(result.activationReady, false);
+    assert.ok(result.blockers.includes('orphan_history_requires_review'));
+    const printed = JSON.stringify(result);
+    for (const value of [account.id, orphanId, 'Private fixture text', db.databaseName]) assert.equal(printed.includes(value), false);
+    assert.deepEqual(await collections.energyLedger(db).find({}).sort({ _id: 1 }).toArray(), before);
+    assert.deepEqual(await collections.energyLedger(db).indexes(), indexes);
+    assert.deepEqual(await db.listCollections({}, { nameOnly: true }).toArray(), names);
+    assert.deepEqual(await collections.atomicUsers(db).findOne({ _id: account.id }), wallet);
+    await collections.energyLedger(db).deleteMany({ userId: { $in: [account.id, orphanId] } });
+  });
+
+
+  await t.test('disposable migration resumes from an atomic checkpoint after a lost response', async () => {
+    const { rehearseLedgerMigration } = await import('./ledgerMigrationHarness');
+    const { readRetainedLedgerStatistics } = await import('../src/lib/ledgerRetention');
+    const a = await user(), b = await user(), untouched = await user(), at = Date.now();
+    for (const [account, size] of [[a, 355], [b, 151]] as const) {
+      await collections.energyLedger(db).deleteMany({ userId: account.id });
+      await collections.energyLedger(db).insertMany(Array.from({ length: size }, (_, i) => ({
+        _id: randomUUID(), userId: account.id, kind: 'admin_adjust' as const,
+        coinsDelta: i % 2 ? -1 : 2, energyDelta: i % 3 ? -5 : 10,
+        resultingCoins: 5, resultingEnergy: 0, note: 'Migration fixture', createdAt: new Date(at - i),
+      })));
+    }
+    const totals = await Promise.all([a, b].map(account => readRetainedLedgerStatistics(db, account.id, at)));
+    const balances = await Promise.all([a, b].map(account => collections.atomicUsers(db).findOne({ _id: account.id })));
+    const sentinel = await collections.energyLedger(db).find({ userId: untouched.id }).toArray();
+    const options = { expectedDatabase: databaseName, runId: randomUUID(), users: [a.id, b.id], asOf: at, batchBudget: 1 };
+    await assert.rejects(() => rehearseLedgerMigration(db, { ...options, expectedDatabase: 'atomic_notes' }), /database_mismatch/);
+    await assert.rejects(() => rehearseLedgerMigration(db, { ...options, users: [a.id, a.id] }), /invalid_migration/);
+    await assert.rejects(() => rehearseLedgerMigration(db, { ...options, afterCommit: async () => { throw new Error('fixture_lost_checkpoint_response'); } }), /lost_checkpoint_response/);
+    assert.equal(await collections.energyLedger(db).countDocuments({ userId: a.id }), 255);
+    await assert.rejects(() => rehearseLedgerMigration(db, { ...options, users: [b.id, a.id] }), /plan_mismatch/);
+    await assert.rejects(() => rehearseLedgerMigration(db, { ...options, asOf: at + 1 }), /plan_mismatch/);
+    // Independent workers resume the same fixed plan; checkpoint and pruning contend atomically.
+    await Promise.all([rehearseLedgerMigration(db, { ...options, batchBudget: 2 }), rehearseLedgerMigration(db, { ...options, batchBudget: 2 })]);
+    const done = await rehearseLedgerMigration(db, { ...options, batchBudget: 10 });
+    assert.equal(done.completed, true); assert.equal(done.removed, 406);
+    const repeated = await rehearseLedgerMigration(db, { ...options, batchBudget: 10 });
+    assert.deepEqual(repeated, done);
+    for (const [i, account] of [a, b].entries()) {
+      assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id }), 50);
+      assert.deepEqual(await readRetainedLedgerStatistics(db, account.id, at), totals[i]);
+      const current = (await collections.atomicUsers(db).findOne({ _id: account.id }))!;
+      assert.equal(current.coins, balances[i]!.coins); assert.equal(current.energy, balances[i]!.energy);
+    }
+    assert.deepEqual(await collections.energyLedger(db).find({ userId: untouched.id }).toArray(), sentinel);
+  });
+
+
+  await t.test('disposable ordering index bounds cleanup selection for a 10000-row history', async () => {
+    const { archiveLedgerBatch } = await import('../src/lib/ledgerRetention');
+    const account = await user(), at = new Date(), col = collections.energyLedger(db);
+    await col.deleteMany({ userId: account.id });
+    const fixtures = Array.from({ length: 10000 }, () => ({ _id: randomUUID(), userId: account.id,
+      kind: 'admin_adjust' as const, coinsDelta: 0, energyDelta: 0, resultingCoins: 5, resultingEnergy: 0,
+      note: 'Synthetic index fixture', createdAt: at }));
+    await col.insertMany(fixtures);
+    const selection = () => col.find({ userId: account.id }).sort({ createdAt: -1, _id: -1 }).skip(50).limit(100);
+    const before = await selection().explain('executionStats');
+    assert.ok(before.executionStats.totalDocsExamined >= 10000, 'timestamp ties require scanning the old owner/time index');
+    assert.ok(JSON.stringify(before.queryPlanner.winningPlan).includes('"stage":"SORT"'));
+    const indexName = 'fixture_ledger_history_order';
+    // Only this suite's uniquely named disposable DB. General production index setup stays unchanged.
+    await col.createIndex({ userId: 1, createdAt: -1, _id: -1 }, { name: indexName });
+    try {
+      const after = await selection().explain('executionStats');
+      assert.equal(after.executionStats.nReturned, 100);
+      assert.ok(after.executionStats.totalKeysExamined <= 155);
+      assert.ok(after.executionStats.totalDocsExamined <= 150);
+      assert.equal(JSON.stringify(after.queryPlanner.winningPlan).includes('"stage":"SORT"'), false);
+      const expected = fixtures.map(row => row._id).sort().reverse();
+      const selected = await selection().toArray();
+      assert.deepEqual(selected.map(row => row._id), expected.slice(50, 150));
+      assert.equal(await withTransaction(session => archiveLedgerBatch(db, account.id, session, at.getTime())), 100);
+      assert.deepEqual((await col.find({ userId: account.id }).sort({ createdAt: -1, _id: -1 }).limit(50).toArray()).map(row => row._id), expected.slice(0, 50));
+      assert.equal(await col.countDocuments({ userId: account.id }), 9900);
+    } finally {
+      await col.dropIndex(indexName);
+    }
+  });
+
 
 });
