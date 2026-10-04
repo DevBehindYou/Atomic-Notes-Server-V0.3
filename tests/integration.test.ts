@@ -3,7 +3,7 @@ import test from 'node:test';
 import { randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Hono } from 'hono';
-import { BSON } from 'mongodb';
+import { BSON, type Db } from 'mongodb';
 import { applySyncRetention, inspectSyncRetention } from '../src/db/syncRetention';
 
 // This suite creates and drops only its own database on a disposable local runner.
@@ -2048,6 +2048,63 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal((await collections.atomicUsers(db).findOne({ _id: account.id }))!.coins, unchangedCoins);
     await assert.rejects(energyHistory(db, account.id), /sequence_invariant/);
     await collections.energyLedger(db).updateOne({ _id: damaged._id }, { $set: { historySequence: damaged.historySequence } });
+  });
+
+  await t.test('Controller financial snapshots stay coherent across controlled credit interleavings', async () => {
+    const { controllerLedgerStatistics } = await import('../src/lib/controllerLedgerStatistics');
+    const { archiveLedgerBatch } = await import('../src/lib/ledgerRetention');
+    const { initializeLedgerSequence } = await import('../src/lib/ledgerSequence');
+    const account = await user();
+    await collections.energyLedger(db).insertMany(Array.from({ length: 50 }, () => ({ _id: randomUUID(),
+      userId: account.id, kind: 'admin_adjust' as const, coinsDelta: 0, energyDelta: 0,
+      resultingCoins: 5, resultingEnergy: 0, note: 'Snapshot fixture', createdAt: new Date() })));
+    await withTransaction(async session => {
+      await archiveLedgerBatch(db, account.id, session, Date.now());
+      await initializeLedgerSequence(db, account.id, session);
+    });
+    for (const when of ['before', 'after'] as const) {
+      const before = await controllerLedgerStatistics(db);
+      let signal!: () => void, release!: () => void;
+      const reached = new Promise<void>(resolve => { signal = resolve; });
+      const released = new Promise<void>(resolve => { release = resolve; });
+      let paused = false;
+      const delayed = new Proxy(db, {
+        get(target, key) {
+          if (key !== 'collection') { const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value; }
+          return (name: string) => {
+            const collection = target.collection(name);
+            if (name !== 'ledger_history_archives') return collection;
+            return new Proxy(collection, {
+              get(object, property) {
+                const value = Reflect.get(object, property);
+                if (property !== 'findOne' || paused) return typeof value === 'function' ? value.bind(object) : value;
+                return async (...args: Parameters<typeof collection.findOne>) => {
+                  paused = true;
+                  if (when === 'before') { signal(); await released; }
+                  const result = await collection.findOne(...args);
+                  if (when === 'after') { signal(); await released; }
+                  return result;
+                };
+              },
+            });
+          };
+        },
+      }) as Db;
+      const reading = controllerLedgerStatistics(delayed);
+      await reached;
+      try {
+        await delay(5); // Ensure commit's timestamp is later than the read's entry time.
+        const credit = await request('/admin/energy', 'POST', { user_id: account.id, coins_delta: 1,
+          energy_delta: 0, request_id: randomUUID() }, undefined, 'test-admin-key');
+        assert.equal(credit.status, 200);
+      } finally { release(); }
+      const result = await reading, added = when === 'before' ? 1 : 0;
+      assert.equal(result.tx_24h, before.tx_24h + added);
+      assert.equal(result.coins_granted_24h, before.coins_granted_24h + added);
+      assert.equal(result.energy_spent_24h, before.energy_spent_24h);
+      assert.equal(result.ledger_by_kind.admin_adjust, before.ledger_by_kind.admin_adjust + added);
+      assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id }), 50);
+    }
   });
 
 });

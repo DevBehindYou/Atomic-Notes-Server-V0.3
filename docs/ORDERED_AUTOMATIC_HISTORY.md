@@ -11,3 +11,8 @@ Marked history sorts by sequence, including backdated or tied timestamps. The AP
 Disposable proof: 51-row migration refusal; rollback of final cleanup+backfill; deterministic backfill; 55 sequential backdated credits keep exactly 50; repeated initialization preserves the high-water mark; rollback after automatic trimming preserves wallet/history/statistics; ten actual concurrent Controller credits; unchanged unmigrated history; unsequenced corruption refuses another credit and rolls back its balance mutation.
 
 Pending: final sequence index/query proof, migration index readiness and preflight, production account enumeration, malformed/orphan handling, deterministic migration-versus-writer interleaving, exact global-statistics read timing under active cleanup, active refund/replay/coin-expiry matrices, backup/restore and old-writer exclusion. Production activation remains gated. No production records or indexes changed.
+
+
+Normal Controller financial reads now establish the snapshot before sampling the reporting time. Explicit historical queries remain strict. Controlled fixtures pause the first snapshot read before/after it executes, commit a real credit plus automatic eviction, then resume. The before case must include the credit once; the after case must retain the old snapshot consistently. Sequences also require a contiguous retained tail up to the high-water mark.
+
+Unmarked production writers reuse their same-transaction wallet snapshot to preserve existing sync command budgets; marked writers reread the advancing sequence to support multiple expiry events in a transaction. A supplied snapshot must match the entry owner. No external payload provides this argument.

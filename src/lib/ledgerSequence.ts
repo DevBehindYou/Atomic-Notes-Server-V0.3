@@ -11,6 +11,10 @@ export function validateOrderedHistory(wallet: AtomicUserDoc, rows: readonly Ene
       || row.historySequence! > wallet.historySequence! || seen.has(row.historySequence!)) throw new Error('ledger_sequence_invariant');
     seen.add(row.historySequence!);
   }
+  if (rows.length === 0 && wallet.historySequence !== 0) throw new Error('ledger_sequence_invariant');
+  for (let index = 0; index < rows.length; index++) {
+    if (!seen.has(wallet.historySequence! - index)) throw new Error('ledger_sequence_invariant');
+  }
 }
 
 /** Operator primitive only; no route/command calls it. Caller must own the migration transaction. */
