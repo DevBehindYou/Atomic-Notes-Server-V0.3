@@ -30,6 +30,9 @@ export async function initializeLedgerSequence(db: Db, userId: string, session: 
     validateOrderedHistory(wallet, rows);
     return;
   }
+  if (wallet.historyRetentionVersion !== undefined || wallet.historySequence !== undefined) {
+    throw new Error('ledger_partial_sequence_migration');
+  }
   for (const row of rows) {
     energyLedgerSchema.parse(row);
     if (row.historySequence !== undefined) throw new Error('ledger_partial_sequence_migration');

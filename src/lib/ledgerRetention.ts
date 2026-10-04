@@ -9,7 +9,7 @@ type Recent = RecentContribution & { _id: string; userId: string };
 export const ledgerArchives = (db: Db) => db.collection<Archive>('ledger_history_archives');
 export const ledgerRecent = (db: Db) => db.collection<Recent>('ledger_history_recent');
 
-/** Inactive building block: caller must commit/retry the whole transaction. Maximum 100 deletions. */
+/** Caller must commit/retry the whole transaction. Maximum 100 deletions; automatic use requires the wallet marker. */
 export async function archiveLedgerBatch(db: Db, userId: string, session: ClientSession, asOf: number): Promise<number> {
   if (!session.inTransaction()) throw new Error('ledger_transaction_required');
   if (!Number.isSafeInteger(asOf)) throw new Error('invalid_statistics_time');

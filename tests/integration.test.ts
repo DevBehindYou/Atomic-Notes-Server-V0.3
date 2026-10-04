@@ -2281,4 +2281,60 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     }
   });
 
+  await t.test('disposable sequence index removes sorting and preserves legacy and active history', async () => {
+    const { archiveLedgerBatch } = await import('../src/lib/ledgerRetention');
+    const account = await user(), legacy = await user(), col = collections.energyLedger(db), at = new Date();
+    await col.deleteMany({ userId: account.id });
+    const activeRows = Array.from({ length: 51 }, (_, index) => ({ _id: randomUUID(), userId: account.id,
+      kind: 'admin_adjust' as const, coinsDelta: 0, energyDelta: 0, resultingCoins: 5, resultingEnergy: 0,
+      historySequence: index + 1, note: 'Synthetic sequence index fixture', createdAt: at }));
+    await col.insertMany(activeRows);
+    await collections.atomicUsers(db).updateOne({ _id: account.id },
+      { $set: { historyRetentionVersion: 1, historySequence: 51 } });
+    const legacyRows = Array.from({ length: 2000 }, () => ({ _id: randomUUID(), userId: legacy.id,
+      kind: 'admin_adjust' as const, coinsDelta: 0, energyDelta: 0, resultingCoins: 5, resultingEnergy: 0,
+      note: 'Unsequenced index compatibility fixture', createdAt: at }));
+    await col.insertMany(legacyRows);
+    const legacyBefore = await col.countDocuments({ userId: legacy.id });
+    const visible = () => col.find({ userId: account.id }).sort({ historySequence: -1 }).limit(50);
+    const eviction = () => col.find({ userId: account.id }).sort({ historySequence: -1 }).skip(50).limit(100);
+    const before = await visible().explain('executionStats');
+    assert.ok(JSON.stringify(before.queryPlanner.winningPlan).includes('"stage":"SORT"'));
+    const indexName = 'fixture_ledger_sequence_order';
+    // Non-unique full index keeps unsequenced legacy rows valid and supports the integrity-checking owner query.
+    // Wallet serialization and contiguous-tail validation enforce sequence uniqueness for supported writers.
+    await col.createIndex({ userId: 1, historySequence: -1 }, { name: indexName });
+    try {
+      const after = await visible().explain('executionStats');
+      assert.equal(after.executionStats.nReturned, 50);
+      assert.ok(after.executionStats.totalKeysExamined <= 51);
+      assert.ok(after.executionStats.totalDocsExamined <= 50);
+      assert.equal(JSON.stringify(after.queryPlanner.winningPlan).includes('"stage":"SORT"'), false);
+      const cleanup = await eviction().explain('executionStats');
+      assert.equal(cleanup.executionStats.nReturned, 1);
+      assert.ok(cleanup.executionStats.totalKeysExamined <= 52);
+      assert.ok(cleanup.executionStats.totalDocsExamined <= 51);
+      assert.equal(JSON.stringify(cleanup.queryPlanner.winningPlan).includes('"stage":"SORT"'), false);
+      assert.deepEqual((await visible().toArray()).map(row => row.historySequence),
+        Array.from({ length: 50 }, (_, index) => 51 - index));
+      assert.equal(await withTransaction(session => archiveLedgerBatch(db, account.id, session, Date.now())), 1);
+      assert.equal(await col.countDocuments({ userId: account.id }), 50);
+      assert.equal(await col.findOne({ _id: activeRows[0]._id }), null);
+      assert.equal(await col.countDocuments({ userId: legacy.id }), legacyBefore);
+      const commandsBefore = mongoCommands.started;
+      const response = await request('/admin/energy', 'POST', { user_id: account.id, coins_delta: 0,
+        energy_delta: 1, request_id: randomUUID() }, undefined, 'test-admin-key');
+      const commands = mongoCommands.started - commandsBefore;
+      assert.equal(response.status, 200);
+      assert.ok(commands <= 40, 'active grant command guard; this is not a latency target');
+      console.log(`ordered-retention fixture commands: ${commands}`);
+      assert.equal(await col.countDocuments({ userId: account.id }), 50);
+      const wallet = (await collections.atomicUsers(db).findOne({ _id: account.id }))!;
+      assert.equal(wallet.historySequence, 52); assert.equal(wallet.energy, 1);
+      assert.deepEqual((await visible().toArray()).map(row => row.historySequence),
+        Array.from({ length: 50 }, (_, index) => 52 - index));
+      assert.equal(await col.countDocuments({ userId: legacy.id }), legacyBefore);
+    } finally { await col.dropIndex(indexName); }
+  });
+
 });
