@@ -2134,7 +2134,11 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     const successfulRows = [row()], failedRows = [row({ title: 'FAIL' })];
     const successId = randomUUID(), failureId = randomUUID();
     assert.equal((await push(successfulRows, account.token, successId, 'instant')).status, 200);
-    const failure = await push(failedRows, account.token, failureId, 'instant');
+    let failure: Response;
+    const previousFailTitle = failTitle;
+    failTitle = 'FAIL';
+    try { failure = await push(failedRows, account.token, failureId, 'instant'); }
+    finally { failTitle = previousFailTitle; }
     assert.equal(failure.status, 502);
     const failedReceipt = await failure.json() as { charged: number; refunded: number };
     assert.deepEqual([failedReceipt.charged, failedReceipt.refunded], [10, 10]);
