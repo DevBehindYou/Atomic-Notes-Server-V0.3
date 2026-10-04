@@ -1966,4 +1966,88 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     }
   });
 
+  await t.test('opt-in ordered history backfill, automatic trimming, rollback and concurrent writes', async () => {
+    const { initializeLedgerSequence } = await import('../src/lib/ledgerSequence');
+    const { archiveLedgerBatch, readRetainedLedgerStatistics, ledgerArchives } = await import('../src/lib/ledgerRetention');
+    const { energyHistory } = await import('../src/lib/energy');
+    const account = await user(), legacy = await user(), at = Date.now();
+    await collections.energyLedger(db).deleteMany({ userId: account.id });
+    const originals = Array.from({ length: 51 }, () => ({ _id: randomUUID(), userId: account.id,
+      kind: 'admin_adjust' as const, coinsDelta: 0, energyDelta: 0, resultingCoins: 5, resultingEnergy: 0,
+      note: 'Sequence fixture', createdAt: new Date(at) }));
+    await collections.energyLedger(db).insertMany(originals);
+    const beforeWallet = await collections.atomicUsers(db).findOne({ _id: account.id });
+    await assert.rejects(() => withTransaction(session => initializeLedgerSequence(db, account.id, session)), /migration_required/);
+    await assert.rejects(() => withTransaction(async session => {
+      await archiveLedgerBatch(db, account.id, session, at);
+      await initializeLedgerSequence(db, account.id, session);
+      throw new Error('fixture_abort_sequence_migration');
+    }), /abort_sequence_migration/);
+    assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id }), 51);
+    assert.equal(await ledgerArchives(db).findOne({ _id: account.id }), null);
+    assert.deepEqual(await collections.atomicUsers(db).findOne({ _id: account.id }), beforeWallet);
+    await withTransaction(async session => {
+      await archiveLedgerBatch(db, account.id, session, at);
+      await initializeLedgerSequence(db, account.id, session);
+    });
+    const assigned = await collections.energyLedger(db).find({ userId: account.id }).sort({ historySequence: 1 }).toArray();
+    assert.deepEqual(assigned.map(row => row._id), originals.map(row => row._id).sort().slice(1));
+    assert.deepEqual(assigned.map(row => row.historySequence), Array.from({ length: 50 }, (_, i) => i + 1));
+    const newIds: string[] = [];
+    for (let i = 0; i < 55; i++) {
+      const id = randomUUID(); newIds.push(id);
+      await withTransaction(async session => {
+        const wallet = (await collections.atomicUsers(db).findOneAndUpdate({ _id: account.id },
+          { $inc: { coins: 1 } }, { session, returnDocument: 'after' }))!;
+        await appendLedger(db, session, { _id: id, userId: account.id, kind: 'admin_adjust', coinsDelta: 1,
+          energyDelta: 0, resultingCoins: wallet.coins, resultingEnergy: wallet.energy,
+          note: 'Synthetic ordered credit', createdAt: new Date(at - (i + 1) * 1000) });
+      });
+      assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id }), 50);
+    }
+    assert.deepEqual((await energyHistory(db, account.id)).map(row => row._id), newIds.slice(-50).reverse());
+    const orderedWallet = (await collections.atomicUsers(db).findOne({ _id: account.id }))!;
+    assert.equal(orderedWallet.historySequence, 105); assert.equal(orderedWallet.coins, beforeWallet!.coins + 55);
+    const totals = await readRetainedLedgerStatistics(db, account.id, Date.now());
+    assert.equal(totals.ledger_by_kind.admin_adjust, 106); assert.equal(totals.coins_granted_24h, 55);
+    await withTransaction(session => initializeLedgerSequence(db, account.id, session));
+    assert.equal((await collections.atomicUsers(db).findOne({ _id: account.id }))!.historySequence, 105);
+    const snapshotWallet = await collections.atomicUsers(db).findOne({ _id: account.id });
+    const snapshotRows = await energyHistory(db, account.id);
+    await assert.rejects(() => withTransaction(async session => {
+      await collections.atomicUsers(db).updateOne({ _id: account.id }, { $inc: { coins: 1 } }, { session });
+      await appendLedger(db, session, { _id: randomUUID(), userId: account.id, kind: 'admin_adjust', coinsDelta: 1,
+        energyDelta: 0, resultingCoins: 0, resultingEnergy: 0, note: 'Synthetic abort', createdAt: new Date() });
+      throw new Error('fixture_abort_after_automatic_trim');
+    }), /abort_after_automatic_trim/);
+    assert.deepEqual(await collections.atomicUsers(db).findOne({ _id: account.id }), snapshotWallet);
+    assert.deepEqual(await energyHistory(db, account.id), snapshotRows);
+    assert.deepEqual(await readRetainedLedgerStatistics(db, account.id, Date.now()), totals);
+    await Promise.all(Array.from({ length: 10 }, async () => {
+      const response = await request('/admin/energy', 'POST', { user_id: account.id, coins_delta: 1,
+        energy_delta: 0, request_id: randomUUID() }, undefined, 'test-admin-key');
+      assert.equal(response.status, 200);
+    }));
+    const concurrent = await energyHistory(db, account.id);
+    assert.equal(concurrent.length, 50);
+    assert.deepEqual(concurrent.map(row => row.historySequence), Array.from({ length: 50 }, (_, i) => 115 - i));
+    assert.equal((await collections.atomicUsers(db).findOne({ _id: account.id }))!.coins, beforeWallet!.coins + 65);
+    // An unmigrated account keeps all its history even through the same writer.
+    for (let i = 0; i < 55; i++) await withTransaction(session => appendLedger(db, session, {
+      _id: randomUUID(), userId: legacy.id, kind: 'admin_adjust', coinsDelta: 0, energyDelta: 0,
+      resultingCoins: 5, resultingEnergy: 0, note: 'Unmigrated fixture', createdAt: new Date() }));
+    assert.equal(await collections.energyLedger(db).countDocuments({ userId: legacy.id }), 56);
+    assert.equal((await collections.atomicUsers(db).findOne({ _id: legacy.id }))!.historyRetentionVersion, undefined);
+    // Unsequenced old-writer/corrupt data causes a rollback, never silent eviction.
+    const damaged = concurrent[0];
+    await collections.energyLedger(db).updateOne({ _id: damaged._id }, { $unset: { historySequence: '' } });
+    const unchangedCoins = (await collections.atomicUsers(db).findOne({ _id: account.id }))!.coins;
+    const rejected = await request('/admin/energy', 'POST', { user_id: account.id, coins_delta: 1,
+      energy_delta: 0, request_id: randomUUID() }, undefined, 'test-admin-key');
+    assert.equal(rejected.status, 500);
+    assert.equal((await collections.atomicUsers(db).findOne({ _id: account.id }))!.coins, unchangedCoins);
+    await assert.rejects(energyHistory(db, account.id), /sequence_invariant/);
+    await collections.energyLedger(db).updateOne({ _id: damaged._id }, { $set: { historySequence: damaged.historySequence } });
+  });
+
 });

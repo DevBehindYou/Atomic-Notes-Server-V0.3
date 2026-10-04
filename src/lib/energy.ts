@@ -1,3 +1,4 @@
+import { validateOrderedHistory } from './ledgerSequence.js';
 import { appendLedger } from './ledger.js';
 import { randomUUID } from 'node:crypto';
 import type { Db } from 'mongodb';
@@ -328,10 +329,16 @@ export async function energyRefund(db: Db, userId: string, amount: number, reaso
 
 /** User-visible history is bounded independently of financial-record retention. */
 export async function energyHistory(db: Db, userId: string) {
-  return collections
-    .energyLedger(db)
-    .find({ userId })
-    .sort({ createdAt: -1, _id: -1 })
-    .limit(50)
-    .toArray();
+  return withTransaction(async session => {
+    const wallet = await collections.atomicUsers(db).findOne({ _id: userId }, { session });
+    const sort: import('mongodb').Sort = wallet?.historyRetentionVersion === 1
+      ? { historySequence: -1 } : { createdAt: -1, _id: -1 };
+    const rows = await collections.energyLedger(db).find({ userId }, { session }).sort(sort)
+      .limit(wallet?.historyRetentionVersion === 1 ? 52 : 50).toArray();
+    if (wallet?.historyRetentionVersion === 1) {
+      validateOrderedHistory(wallet, rows);
+      if (rows.length > 50) throw new Error('ledger_sequence_invariant');
+    }
+    return rows;
+  }, { readConcern: { level: 'snapshot' } });
 }
