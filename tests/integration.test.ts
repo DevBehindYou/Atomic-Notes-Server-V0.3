@@ -1483,6 +1483,38 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     }
   });
 
+  await t.test('disposable ordering index bounds cleanup selection for a 10000-row history', async () => {
+    const { archiveLedgerBatch } = await import('../src/lib/ledgerRetention');
+    const account = await user(), at = new Date(), col = collections.energyLedger(db);
+    await col.deleteMany({ userId: account.id });
+    const fixtures = Array.from({ length: 10000 }, () => ({ _id: randomUUID(), userId: account.id,
+      kind: 'admin_adjust' as const, coinsDelta: 0, energyDelta: 0, resultingCoins: 5, resultingEnergy: 0,
+      note: 'Synthetic index fixture', createdAt: at }));
+    await col.insertMany(fixtures);
+    const selection = () => col.find({ userId: account.id }).sort({ createdAt: -1, _id: -1 }).skip(50).limit(100);
+    const before = await selection().explain('executionStats');
+    assert.ok(before.executionStats.totalDocsExamined >= 10000, 'timestamp ties require scanning the old owner/time index');
+    assert.ok(JSON.stringify(before.queryPlanner.winningPlan).includes('"stage":"SORT"'));
+    const indexName = 'fixture_ledger_history_order';
+    // Only this suite's uniquely named disposable DB. General production index setup stays unchanged.
+    await col.createIndex({ userId: 1, createdAt: -1, _id: -1 }, { name: indexName });
+    try {
+      const after = await selection().explain('executionStats');
+      assert.equal(after.executionStats.nReturned, 100);
+      assert.ok(after.executionStats.totalKeysExamined <= 155);
+      assert.ok(after.executionStats.totalDocsExamined <= 150);
+      assert.equal(JSON.stringify(after.queryPlanner.winningPlan).includes('"stage":"SORT"'), false);
+      const expected = fixtures.map(row => row._id).sort().reverse();
+      const selected = await selection().toArray();
+      assert.deepEqual(selected.map(row => row._id), expected.slice(50, 150));
+      assert.equal(await withTransaction(session => archiveLedgerBatch(db, account.id, session, at.getTime())), 100);
+      assert.deepEqual((await col.find({ userId: account.id }).sort({ createdAt: -1, _id: -1 }).limit(50).toArray()).map(row => row._id), expected.slice(0, 50));
+      assert.equal(await col.countDocuments({ userId: account.id }), 9900);
+    } finally {
+      await col.dropIndex(indexName);
+    }
+  });
+
   await t.test('R10 deleted-note history has no automatic expiry, and only the newest 5 sessions stay valid', async () => {
     const ttl = (await collections.notes(db).indexes()).filter((index) => index.expireAfterSeconds !== undefined);
     assert.deepEqual(ttl, [], 'deletion history must remain available to long-offline clients');
