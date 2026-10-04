@@ -1,12 +1,16 @@
 import type { ClientSession, Db } from 'mongodb';
-import { collections, type EnergyLedgerDoc } from '../db/collections.js';
+import { collections, type EnergyLedgerDoc, type AtomicUserDoc } from '../db/collections.js';
 import { archiveLedgerBatch } from './ledgerRetention.js';
 import { validateOrderedHistory } from './ledgerSequence.js';
 
 /** Balance, sequence, history, statistics and trimming share the caller's commit/retry. */
-export async function appendLedger(db: Db, session: ClientSession, entry: EnergyLedgerDoc): Promise<void> {
+export async function appendLedger(db: Db, session: ClientSession, entry: EnergyLedgerDoc, walletSnapshot?: AtomicUserDoc): Promise<void> {
   if (!session.inTransaction()) throw new Error('ledger_transaction_required');
-  const wallet = await collections.atomicUsers(db).findOne({ _id: entry.userId }, { session });
+  if (walletSnapshot && walletSnapshot._id !== entry.userId) throw new Error('ledger_wallet_owner_mismatch');
+  // Real writers already read and mutate this wallet in their transaction. Migration contends on that same row.
+  // Marked accounts reread the advancing high-water mark, including multiple expiry entries in one transaction.
+  const wallet = walletSnapshot && walletSnapshot.historyRetentionVersion !== 1 ? walletSnapshot
+    : await collections.atomicUsers(db).findOne({ _id: entry.userId }, { session });
   if (!wallet) throw new Error('ledger_wallet_missing');
   if (wallet.historyRetentionVersion !== 1) {
     if (entry.historySequence !== undefined) throw new Error('ledger_sequence_not_enabled');

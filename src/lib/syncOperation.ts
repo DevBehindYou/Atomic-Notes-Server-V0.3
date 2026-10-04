@@ -79,7 +79,7 @@ export async function openSync(db: Db, userId: string, requestId: string, rows: 
     }, { session });
     await appendLedger(db, session, { _id: randomUUID(), userId, kind: 'spend', coinsDelta: 0,
       energyDelta: -charged, resultingCoins: current.coins, resultingEnergy: current.energy - charged,
-      note: `${mode === 'instant' ? 'Instant' : 'Standard'} sync`, createdAt: now });
+      note: `${mode === 'instant' ? 'Instant' : 'Standard'} sync`, createdAt: now }, current);
     await syncOperations(db).insertOne(operation, { session });
     return operation;
   });
@@ -156,7 +156,7 @@ async function finishSyncAtomically(db: Db, operation: SyncOperation) {
       if (refunded > 0) {
         await appendLedger(db, session, { _id: randomUUID(), userId: current.userId, kind: 'admin_adjust',
           coinsDelta: 0, energyDelta: refunded, resultingCoins: wallet.coins, resultingEnergy: wallet.energy + refunded,
-          note: 'Refund: sync failed before any note succeeded', createdAt: new Date() });
+          note: 'Refund: sync failed before any note succeeded', createdAt: new Date() }, wallet);
       }
     }
     await syncOperations(db).updateOne({ _id: current._id }, { $set: { results, refunded, status: 'complete' } }, { session });

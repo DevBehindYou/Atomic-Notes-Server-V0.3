@@ -108,7 +108,7 @@ async function getOrInitWallet(db: Db, userId: string): Promise<AtomicUserDoc> {
         resultingCoins: 5,
         resultingEnergy: 0,
         note: 'Welcome gift: 5 Atomic Coins',
-      });
+      }, fresh);
     }
   });
 
@@ -149,9 +149,10 @@ async function writeLedger(
     coinOperationId?: string;
     lotIds?: string[];
   },
+  wallet: AtomicUserDoc,
 ) {
   await appendLedger(db, session,
-    { _id: randomUUID(), createdAt: new Date(), ...entry });
+    { _id: randomUUID(), createdAt: new Date(), ...entry }, wallet);
 }
 
 /**
@@ -196,7 +197,7 @@ export async function energyGrantDaily(db: Db, userId: string): Promise<void> {
       resultingCoins: updated.coins,
       resultingEnergy: updated.energy,
       note: days > 1 ? `Daily energy grant (${days} days)` : 'Daily energy grant',
-    });
+    }, updated);
   });
 }
 
@@ -236,7 +237,7 @@ export async function energyConvert(db: Db, userId: string, coins: number, reque
       resultingCoins: updated.coins,
       resultingEnergy: updated.energy,
       note: `Converted ${coins} coins`,
-    });
+    }, updated);
   });
 }
 
@@ -284,7 +285,7 @@ export async function energyUpgradeNoteLimit(db: Db, userId: string, fromLimit: 
       resultingCoins: updated.coins,
       resultingEnergy: updated.energy,
       note: `Note limit ${fromLimit} to ${nextTier.limit} (${nextTier.name})`,
-    });
+    }, updated);
     return updated;
   });
 }
@@ -323,7 +324,7 @@ export async function energyRefund(db: Db, userId: string, amount: number, reaso
       resultingCoins: updated.coins,
       resultingEnergy: updated.energy,
       note: `Refund: ${reason}`,
-    });
+    }, updated);
   });
 }
 
