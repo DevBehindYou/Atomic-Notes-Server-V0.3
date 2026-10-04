@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -381,4 +382,36 @@ test('ordering readiness requires full usable non-TTL indexes and legacy-compati
     }
     assert.equal(ledgerOrderingIndexReady([{ key, unique: true }], mode), mode === 'legacy');
   }
+});
+
+import { ledgerWalletIssues } from '../src/db/ledgerIntegrityInspection';
+test('wallet diagnostics accept legacy and contiguous ordered histories without returning account values', () => {
+  const id = randomUUID(), wallet = { _id: id };
+  assert.deepEqual(ledgerWalletIssues(wallet, []), []);
+  assert.deepEqual(ledgerWalletIssues({ ...wallet, historyRetentionVersion: 1, historySequence: 0 }, []), []);
+  const rows = [5, 3, 4].map(historySequence => ({ userId: id, historySequence }));
+  assert.deepEqual(ledgerWalletIssues({ ...wallet, historyRetentionVersion: 1, historySequence: 5 }, rows), []);
+  assert.deepEqual(ledgerWalletIssues({ ...wallet, historyRetentionVersion: 1, historySequence: Number.MAX_SAFE_INTEGER },
+    [{ userId: id, historySequence: Number.MAX_SAFE_INTEGER }]), []);
+});
+
+test('wallet diagnostics distinguish partial metadata, invalid tails and the active history bound', () => {
+  const id = randomUUID(), wallet = { _id: id, historyRetentionVersion: 1, historySequence: 3 };
+  for (const fields of [{ historySequence: 2 }, { historyRetentionVersion: 2 }, { historyRetentionVersion: null },
+    { historySequence: null }]) {
+    assert.deepEqual(ledgerWalletIssues({ _id: id, ...fields }, []), ['partial_wallet_metadata']);
+  }
+  for (const counter of [undefined, null, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '3']) {
+    assert.ok(ledgerWalletIssues({ ...wallet, historySequence: counter }, []).includes('invalid_ordered_history'));
+  }
+  for (const sequences of [[], [3, 3], [3, 1], [4], [undefined], [0], [-1], [1.5], ['3']]) {
+    assert.ok(ledgerWalletIssues(wallet, sequences.map(historySequence => ({ userId: id, historySequence })))
+      .includes('invalid_ordered_history'));
+  }
+  assert.ok(ledgerWalletIssues(wallet, [{ userId: randomUUID(), historySequence: 3 }]).includes('invalid_ordered_history'));
+  assert.deepEqual(ledgerWalletIssues({ _id: 'invalid-owner' }, []), ['invalid_wallet_identity']);
+  const tooMany = Array.from({ length: 51 }, (_, index) => ({ userId: id, historySequence: index + 1 }));
+  assert.deepEqual(ledgerWalletIssues({ ...wallet, historySequence: 51 }, tooMany), ['ordered_history_over_limit']);
+  const printed = JSON.stringify(ledgerWalletIssues({ ...wallet, historySequence: -1 }, tooMany));
+  assert.equal(printed.includes(id), false);
 });

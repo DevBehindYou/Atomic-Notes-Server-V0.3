@@ -360,6 +360,67 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     await collections.energyLedger(db).deleteMany({ userId: { $in: [account.id, orphanId] } });
   });
 
+  await t.test('integrity preflight counts anomalies without exposing or changing their records', async () => {
+    const { inspectLedgerRetention } = await import('../src/db/ledgerRetentionInspection');
+    const { inspectLedgerIntegrity } = await import('../src/db/ledgerIntegrityInspection');
+    const baseline = await inspectLedgerRetention(db);
+    const accounts = await Promise.all(Array.from({ length: 9 }, () => user()));
+    const [valid, excess, duplicate, gap, missingCounter, partial, unsupported, deepLegacy, empty] = accounts;
+    const rawWallets = db.collection<{ _id: string; [key: string]: unknown }>('atomic_users');
+    const rawRows = db.collection<{ _id: string; [key: string]: unknown }>('energy_ledger');
+    const invalidOwner = 'private-invalid-wallet-id';
+    await rawWallets.insertOne({ _id: invalidOwner } as any);
+    const entry = (userId: string, historySequence?: number) => ({ _id: randomUUID(), userId,
+      kind: 'admin_adjust', coinsDelta: 0, energyDelta: 0, resultingCoins: 5, resultingEnergy: 0,
+      note: 'Private integrity fixture', createdAt: new Date(), ...(historySequence === undefined ? {} : { historySequence }) });
+    for (const [account, sequences, counter] of [[valid, Array.from({ length: 50 }, (_, i) => 51 + i), 100],
+      [excess, Array.from({ length: 51 }, (_, i) => i + 1), 51], [duplicate, [2, 2], 2], [gap, [1, 3], 3],
+      [empty, [], 0]] as const) {
+      await rawRows.deleteMany({ userId: account.id });
+      if (sequences.length) await rawRows.insertMany(sequences.map(sequence => entry(account.id, sequence)));
+      await rawWallets.updateOne({ _id: account.id } as any, { $set: { historyRetentionVersion: 1, historySequence: counter } });
+    }
+    await rawWallets.updateOne({ _id: missingCounter.id } as any, { $set: { historyRetentionVersion: 1 } });
+    await rawWallets.updateOne({ _id: partial.id } as any, { $set: { historySequence: 7 } });
+    await rawWallets.updateOne({ _id: unsupported.id } as any, { $set: { historyRetentionVersion: 2 } });
+    await rawRows.insertMany([...Array.from({ length: 60 }, () => entry(deepLegacy.id)), entry(deepLegacy.id, 20)]);
+    const orphanId = randomUUID();
+    await rawRows.insertMany([{ ...entry(partial.id), energyDelta: 'malformed-private-value' },
+      { ...entry(orphanId), createdAt: 'invalid-private-date' }, entry(orphanId)]);
+    const beforeRows = await rawRows.find({}).sort({ _id: 1 }).toArray();
+    const beforeWallets = await rawWallets.find({}).sort({ _id: 1 }).toArray();
+    const beforeCatalog = await db.listCollections({}, { nameOnly: true }).toArray();
+    const beforeIndexes = await rawRows.indexes();
+    const result = await inspectLedgerRetention(db);
+    assert.equal(result.walletAccounts, baseline.walletAccounts + 10);
+    assert.equal(result.invalidWalletIdentities, baseline.invalidWalletIdentities + 1);
+    assert.equal(result.orderedAccounts, baseline.orderedAccounts + 6);
+    assert.equal(result.partialWalletAccounts, baseline.partialWalletAccounts + 2);
+    assert.equal(result.invalidOrderedAccounts, baseline.invalidOrderedAccounts + 3);
+    assert.equal(result.overLimitOrderedAccounts, baseline.overLimitOrderedAccounts + 1);
+    assert.equal(result.malformedRows, baseline.malformedRows + 2);
+    assert.equal(result.orphanRows, baseline.orphanRows + 2);
+    assert.equal(result.sequencedUnmarkedRows, baseline.sequencedUnmarkedRows + 1);
+    assert.equal(result.activationReady, false);
+    for (const blocker of ['malformed_history_requires_review', 'wallet_metadata_requires_review',
+      'ordered_history_requires_review', 'unmarked_sequence_rows_require_review', 'orphan_history_requires_review']) {
+      assert.ok(result.blockers.includes(blocker));
+    }
+    const printed = JSON.stringify(result);
+    for (const value of [...accounts.map(account => account.id), orphanId, invalidOwner, db.databaseName,
+      'Private integrity fixture', 'malformed-private-value', 'invalid-private-date']) assert.equal(printed.includes(value), false);
+    assert.deepEqual(await rawRows.find({}).sort({ _id: 1 }).toArray(), beforeRows);
+    assert.deepEqual(await rawWallets.find({}).sort({ _id: 1 }).toArray(), beforeWallets);
+    assert.deepEqual(await rawRows.indexes(), beforeIndexes);
+    assert.deepEqual(await db.listCollections({}, { nameOnly: true }).toArray(), beforeCatalog);
+    await withTransaction(async session => {
+      await session.abortTransaction();
+      await assert.rejects(() => inspectLedgerIntegrity(db, session), /transaction_required/);
+    });
+    await rawRows.deleteMany({ userId: { $in: [...accounts.map(account => account.id), orphanId] } });
+    await rawWallets.deleteMany({ _id: { $in: [...accounts.map(account => account.id), invalidOwner] } } as any);
+  });
+
   await t.test('owner isolation, partial updates and failed pushes', async () => {
     const original = row(); assert.equal((await push([original])).status, 200);
     const before = writes;
