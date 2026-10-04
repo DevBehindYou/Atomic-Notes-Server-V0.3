@@ -277,6 +277,9 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     await withTransaction(session => archiveLedgerBatch(db, account.id, session, at + 86400001));
     assert.equal(await ledgerRecent(db).countDocuments({ userId: account.id }), 0);
     assert.deepEqual((await ledgerArchives(db).findOne({ _id: account.id }))!.byKind, archive.byKind);
+    // Remove this clock-advanced fixture so later real-time Controller tests remain isolated.
+    await ledgerArchives(db).deleteOne({ _id: account.id });
+    await collections.energyLedger(db).deleteMany({ userId: account.id });
   });
 
   await t.test('cleanup racing Controller credits preserves balances and snapshot statistics', async () => {
@@ -310,6 +313,63 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
       assert.equal(view.coins_granted_24h - before.coins_granted_24h, credits);
       assert.equal(view.energy_spent_24h, before.energy_spent_24h);
     }
+  });
+
+  await t.test('global Controller financial totals stay identical after account history cleanup', async () => {
+    const { archiveLedgerBatch, ledgerArchives, ledgerRecent } = await import('../src/lib/ledgerRetention');
+    const { controllerLedgerStatistics } = await import('../src/lib/controllerLedgerStatistics');
+    // A preceding fixture advanced projection time to prove contribution expiry.
+    const at = Date.now() + 2 * 86400000;
+    const account = await user();
+    await collections.energyLedger(db).insertMany(Array.from({ length: 151 }, (_, i) => ({
+      _id: randomUUID(), userId: account.id, kind: 'admin_adjust' as const, coinsDelta: i % 2 ? -3 : 7,
+      energyDelta: i % 3 ? -5 : 20, resultingCoins: 5, resultingEnergy: 0, note: 'Global stats fixture',
+      createdAt: new Date(at - 86400000 + (i % 3) - 1),
+    })));
+    const before = await controllerLedgerStatistics(db, at);
+    await withTransaction(session => archiveLedgerBatch(db, account.id, session, at));
+    assert.deepEqual(await controllerLedgerStatistics(db, at), before);
+    await withTransaction(session => archiveLedgerBatch(db, account.id, session, at));
+    assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id }), 50);
+    assert.deepEqual(await controllerLedgerStatistics(db, at), before);
+    const later = await controllerLedgerStatistics(db, at + 2);
+    assert.deepEqual(later.ledger_by_kind, before.ledger_by_kind);
+    assert.ok(later.tx_24h < before.tx_24h);
+    await ledgerArchives(db).deleteOne({ _id: account.id });
+    await ledgerRecent(db).deleteMany({ userId: account.id });
+    await collections.energyLedger(db).deleteMany({ userId: account.id });
+  });
+
+  await t.test('sync refund and replay survive eviction of the original charge history', async () => {
+    const { archiveLedgerBatch } = await import('../src/lib/ledgerRetention');
+    const account = await user(), requestId = randomUUID(), rows = [row()];
+    await refill(account.id);
+    await collections.atomicUsers(db).updateOne({ _id: account.id }, { $set: { lastDailyGrantAt: new Date() } });
+    const operation = await beginSync(db, account.id, requestId, rows.map(value => remoteNoteRowSchema.parse(value)), 'instant');
+    const charge = await collections.energyLedger(db).findOne({ userId: account.id, kind: 'spend' });
+    assert.ok(charge);
+    const at = Date.now();
+    await collections.energyLedger(db).insertMany(Array.from({ length: 60 }, () => ({
+      _id: randomUUID(), userId: account.id, kind: 'admin_adjust' as const, coinsDelta: 0, energyDelta: 0,
+      resultingCoins: 5, resultingEnergy: 90, note: 'Synthetic newer history', createdAt: new Date(at + 1000),
+    })));
+    await withTransaction(session => archiveLedgerBatch(db, account.id, session, at));
+    assert.equal(await collections.energyLedger(db).findOne({ _id: charge._id }), null);
+    const [first, repeated] = await Promise.all([finishSync(db, operation), finishSync(db, operation)]);
+    assert.equal(first.refunded, 10); assert.equal(repeated.refunded, 10);
+    const balance = (await collections.atomicUsers(db).findOne({ _id: account.id }))!.energy;
+    assert.equal(balance, 100);
+    const writesBefore = writes;
+    for (let i = 0; i < 2; i++) {
+      const response = await push(rows, account.token, requestId, 'instant');
+      assert.equal(response.status, 502); // Replay preserves the failed operation outcome.
+      const body = await response.json() as { charged: number; refunded: number; error: string };
+      assert.equal(body.error, 'note_sync_failed');
+      assert.equal(body.charged, 10); assert.equal(body.refunded, 10);
+    }
+    assert.equal(writes, writesBefore);
+    assert.equal((await collections.atomicUsers(db).findOne({ _id: account.id }))!.energy, balance);
+    assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id, note: 'Refund: sync failed before any note succeeded' }), 1);
   });
 
   await t.test('owner isolation, partial updates and failed pushes', async () => {
