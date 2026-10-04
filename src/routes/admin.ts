@@ -185,7 +185,7 @@ admin.post('/energy', async (c) => {
         // The App shows this note in the user's Activity list, so the default speaks to them.
         note: body.note?.trim() || 'Balance adjusted by Atomic Notes',
         createdAt: new Date(),
-      });
+      }, wallet);
 
     return { newCoins, newEnergy };
   });

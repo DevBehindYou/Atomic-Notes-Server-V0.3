@@ -47,7 +47,7 @@ export async function computeControllerStats(db: Db) {
       ])
       .toArray(),
     collections.notifications(db).countDocuments({ status: 'active' }),
-    controllerLedgerStatistics(db, cutoff24h.getTime() + 24 * 60 * 60 * 1000),
+    controllerLedgerStatistics(db),
   ]);
 
   return {
