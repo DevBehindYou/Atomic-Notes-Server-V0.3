@@ -45,7 +45,7 @@ export async function prepareCoinWallet(
       _id: randomUUID(), userId, kind: 'admin_adjust', reason: 'coin_expired', lotIds: [lot._id],
       coinsDelta: -lot.remaining, energyDelta: 0, resultingCoins: wallet.coins,
       resultingEnergy: wallet.energy, note: `${lot.remaining} Atomic Coins expired`, createdAt: now,
-    });
+    }, wallet);
   }
   return wallet;
 }

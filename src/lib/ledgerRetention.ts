@@ -1,4 +1,5 @@
-import type { ClientSession, Db } from 'mongodb';
+import { validateOrderedHistory } from './ledgerSequence.js';
+import type { ClientSession, Db, Sort } from 'mongodb';
 import { withTransaction } from '../db/mongo.js';
 import { collections, energyLedgerSchema } from '../db/collections.js';
 import { combineLedgerStatistics, projectArchivedStatistics, type KindCounts, type RecentContribution, LEDGER_WINDOW_MS } from './ledgerStatistics.js';
@@ -8,18 +9,23 @@ type Recent = RecentContribution & { _id: string; userId: string };
 export const ledgerArchives = (db: Db) => db.collection<Archive>('ledger_history_archives');
 export const ledgerRecent = (db: Db) => db.collection<Recent>('ledger_history_recent');
 
-/** Inactive building block: caller must commit/retry the whole transaction. Maximum 100 deletions. */
+/** Caller must commit/retry the whole transaction. Maximum 100 deletions; automatic use requires the wallet marker. */
 export async function archiveLedgerBatch(db: Db, userId: string, session: ClientSession, asOf: number): Promise<number> {
   if (!session.inTransaction()) throw new Error('ledger_transaction_required');
   if (!Number.isSafeInteger(asOf)) throw new Error('invalid_statistics_time');
   // Contend with all existing monetary writers before selecting any history rows.
-  const lock = await db.collection<{ _id: string; historyRevision?: number }>('atomic_users')
-    .updateOne({ _id: userId }, { $inc: { historyRevision: 1 } }, { session });
-  if (!lock.matchedCount) throw new Error('ledger_wallet_missing');
+  const wallet = await collections.atomicUsers(db).findOneAndUpdate({ _id: userId },
+    { $inc: { historyRevision: 1 } }, { session, returnDocument: 'after' });
+  if (!wallet) throw new Error('ledger_wallet_missing');
+  const sort: Sort = wallet.historyRetentionVersion === 1 ? { historySequence: -1 } : { createdAt: -1, _id: -1 };
+  if (wallet.historyRetentionVersion === 1) {
+    const ordered = await collections.energyLedger(db).find({ userId }, { session }).limit(52).toArray();
+    validateOrderedHistory(wallet, ordered);
+  }
   const previous = await ledgerArchives(db).findOne({ _id: userId }, { session });
   if (previous && asOf < previous.projectedAt) throw new Error('statistics_time_regression');
   const rows = await collections.energyLedger(db).find({ userId }, { session })
-    .sort({ createdAt: -1, _id: -1 }).skip(50).limit(100).toArray();
+    .sort(sort).skip(50).limit(100).toArray();
   // Refuse corrupted historical records instead of coercing their deltas or losing their original fields.
   // A static error keeps validation details and financial text out of logs/responses.
   for (const row of rows) {

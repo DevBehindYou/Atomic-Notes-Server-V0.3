@@ -82,6 +82,9 @@ export const atomicUserSchema = z.object({
   _id: z.string().uuid(), // == userId
   username: z.string().default(''),
   noteLimit: z.number().int().default(30),
+  historyRetentionVersion: z.literal(1).optional(),
+  historySequence: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  historyRevision: z.number().int().nonnegative().optional(),
   coinLotsVersion: z.literal(1).optional(),
   coinMutationRevision: z.number().int().optional(),
   coinPolicyActivatedAt: z.date().optional(),
@@ -113,6 +116,7 @@ export type AtomicUserDoc = z.infer<typeof atomicUserSchema>;
 // ---------------------------------------------------------------------------
 export const energyTxKind = z.enum(['daily_grant', 'convert', 'spend', 'purchase', 'admin_adjust']);
 export const energyLedgerSchema = z.object({
+  historySequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
   _id: z.string().uuid(),
   userId: z.string().uuid(),
   kind: energyTxKind,

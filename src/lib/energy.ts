@@ -1,3 +1,4 @@
+import { validateOrderedHistory } from './ledgerSequence.js';
 import { appendLedger } from './ledger.js';
 import { randomUUID } from 'node:crypto';
 import type { Db } from 'mongodb';
@@ -107,7 +108,7 @@ async function getOrInitWallet(db: Db, userId: string): Promise<AtomicUserDoc> {
         resultingCoins: 5,
         resultingEnergy: 0,
         note: 'Welcome gift: 5 Atomic Coins',
-      });
+      }, fresh);
     }
   });
 
@@ -148,9 +149,10 @@ async function writeLedger(
     coinOperationId?: string;
     lotIds?: string[];
   },
+  wallet: AtomicUserDoc,
 ) {
   await appendLedger(db, session,
-    { _id: randomUUID(), createdAt: new Date(), ...entry });
+    { _id: randomUUID(), createdAt: new Date(), ...entry }, wallet);
 }
 
 /**
@@ -195,7 +197,7 @@ export async function energyGrantDaily(db: Db, userId: string): Promise<void> {
       resultingCoins: updated.coins,
       resultingEnergy: updated.energy,
       note: days > 1 ? `Daily energy grant (${days} days)` : 'Daily energy grant',
-    });
+    }, updated);
   });
 }
 
@@ -235,7 +237,7 @@ export async function energyConvert(db: Db, userId: string, coins: number, reque
       resultingCoins: updated.coins,
       resultingEnergy: updated.energy,
       note: `Converted ${coins} coins`,
-    });
+    }, updated);
   });
 }
 
@@ -283,7 +285,7 @@ export async function energyUpgradeNoteLimit(db: Db, userId: string, fromLimit: 
       resultingCoins: updated.coins,
       resultingEnergy: updated.energy,
       note: `Note limit ${fromLimit} to ${nextTier.limit} (${nextTier.name})`,
-    });
+    }, updated);
     return updated;
   });
 }
@@ -322,16 +324,22 @@ export async function energyRefund(db: Db, userId: string, amount: number, reaso
       resultingCoins: updated.coins,
       resultingEnergy: updated.energy,
       note: `Refund: ${reason}`,
-    });
+    }, updated);
   });
 }
 
 /** User-visible history is bounded independently of financial-record retention. */
 export async function energyHistory(db: Db, userId: string) {
-  return collections
-    .energyLedger(db)
-    .find({ userId })
-    .sort({ createdAt: -1, _id: -1 })
-    .limit(50)
-    .toArray();
+  return withTransaction(async session => {
+    const wallet = await collections.atomicUsers(db).findOne({ _id: userId }, { session });
+    const sort: import('mongodb').Sort = wallet?.historyRetentionVersion === 1
+      ? { historySequence: -1 } : { createdAt: -1, _id: -1 };
+    const rows = await collections.energyLedger(db).find({ userId }, { session }).sort(sort)
+      .limit(wallet?.historyRetentionVersion === 1 ? 52 : 50).toArray();
+    if (wallet?.historyRetentionVersion === 1) {
+      validateOrderedHistory(wallet, rows);
+      if (rows.length > 50) throw new Error('ledger_sequence_invariant');
+    }
+    return rows;
+  }, { readConcern: { level: 'snapshot' } });
 }
