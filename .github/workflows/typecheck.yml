@@ -62,6 +62,10 @@ jobs:
         env:
           MONGODB_URI: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
         run: npm run benchmark:admin-pages
+      - name: Disposable client HTTP fixture smoke
+        env:
+          MONGODB_URI: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
+        run: npm run test:client-fixture
       - name: MongoDB failure diagnostics
         if: failure()
         run: docker logs atomic-test-mongo || true
