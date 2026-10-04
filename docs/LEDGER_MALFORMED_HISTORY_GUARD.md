@@ -1,0 +1,9 @@
+# Refuse malformed records during transactional history cleanup
+
+archiveLedgerBatch previously passed its selected raw Mongo records directly to the statistics projector. TypeScript annotations do not validate database contents. A numeric string delta could be coerced into a number, and an unknown kind, structured note or malformed identifier could be archived and physically removed instead of being retained for review.
+
+The guard checks every selected row against the current energyLedgerSchema before projecting, updating archive/recent statistics or deleting records. A static malformed_ledger_history error avoids logging schema errors, IDs, values or transaction text. The caller transaction rolls back its wallet mutation/historyRevision together with history and statistics. The bounded batch limit and all valid-row behavior remain unchanged.
+
+Regression proof starts at 38517e9 on the unchanged cleanup code. The matrix covers numeric-string deltas, unknown kinds, structured notes, invalid UUID identifiers and non-Date timestamps. Each case must preserve the entire wallet, 51 source rows and archive/recent documents after an attempted caller balance mutation. The valid control still removes exactly one of 51 records. Exact CI before/after metadata belongs in the PR and progress report.
+
+This validates selected deletion candidates, not every row elsewhere in the account. It uses the existing schema without repairing data or changing the economy. A prior valid batch may already have committed before a later bad batch is encountered; full account preflight and reviewed restart/backup handling are still required. No data is silently normalized or quarantined. Production migration/index approval, backup restoration and old-writer exclusion remain separate gates. No production query or write occurs in these tests.

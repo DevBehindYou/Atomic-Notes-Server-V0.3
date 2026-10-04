@@ -1,6 +1,6 @@
 import type { ClientSession, Db } from 'mongodb';
 import { withTransaction } from '../db/mongo.js';
-import { collections } from '../db/collections.js';
+import { collections, energyLedgerSchema } from '../db/collections.js';
 import { combineLedgerStatistics, projectArchivedStatistics, type KindCounts, type RecentContribution, LEDGER_WINDOW_MS } from './ledgerStatistics.js';
 
 type Archive = { _id: string; projectedAt: number; byKind: KindCounts };
@@ -20,6 +20,11 @@ export async function archiveLedgerBatch(db: Db, userId: string, session: Client
   if (previous && asOf < previous.projectedAt) throw new Error('statistics_time_regression');
   const rows = await collections.energyLedger(db).find({ userId }, { session })
     .sort({ createdAt: -1, _id: -1 }).skip(50).limit(100).toArray();
+  // Refuse corrupted historical records instead of coercing their deltas or losing their original fields.
+  // A static error keeps validation details and financial text out of logs/responses.
+  for (const row of rows) {
+    if (!energyLedgerSchema.safeParse(row).success) throw new Error('malformed_ledger_history');
+  }
   const projection = projectArchivedStatistics(userId, rows, asOf);
   const counts = Object.fromEntries(Object.entries(projection.byKind).map(([kind, value]) => [`byKind.${kind}`, value]));
   await ledgerArchives(db).updateOne({ _id: userId }, {
