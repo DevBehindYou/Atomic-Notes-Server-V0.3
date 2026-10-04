@@ -4,6 +4,17 @@ export function ledgerInspectionArguments(args: string[]): void {
   if (args.length) throw new Error('usage: db:inspect-ledger-history (inspection only; no apply mode)');
 }
 
+type OrderingIndex = { key: Record<string, unknown>; partialFilterExpression?: unknown; sparse?: boolean;
+  hidden?: boolean; collation?: unknown; expireAfterSeconds?: number; unique?: boolean };
+
+/** Readiness only. A sequence index must coexist with multiple unsequenced legacy rows per owner. */
+export function ledgerOrderingIndexReady(indexes: readonly OrderingIndex[], mode: 'legacy' | 'sequence'): boolean {
+  const key = mode === 'legacy' ? { userId: 1, createdAt: -1, _id: -1 } : { userId: 1, historySequence: -1 };
+  return indexes.some(index => JSON.stringify(index.key) === JSON.stringify(key)
+    && !index.partialFilterExpression && !index.sparse && !index.hidden && !index.collation
+    && index.expireAfterSeconds === undefined && (mode !== 'sequence' || !index.unique));
+}
+
 /** Read-only counts. Does not return account IDs, transaction notes, balances or connection details. */
 export async function inspectLedgerRetention(db: Db) {
   const { withTransaction } = await import('./mongo.js');
@@ -29,10 +40,11 @@ export async function inspectLedgerRetention(db: Db) {
   // Catalog readiness is a separate read, not part of the data snapshot. Never create a missing collection.
   const exists = await db.listCollections({ name: 'energy_ledger' }, { nameOnly: true }).hasNext();
   const indexes = exists ? await db.collection('energy_ledger').indexes() : [];
-  const orderingIndexReady = indexes.some(index => JSON.stringify(index.key) === JSON.stringify({ userId: 1, createdAt: -1, _id: -1 })
-    && !index.partialFilterExpression && !index.sparse && !index.hidden && !index.collation);
-  return { mode: 'inspect-only' as const, limit: 50, ...counts, orderingIndexReady,
+  const orderingIndexReady = ledgerOrderingIndexReady(indexes, 'legacy');
+  const sequenceOrderingIndexReady = ledgerOrderingIndexReady(indexes, 'sequence');
+  return { mode: 'inspect-only' as const, limit: 50, ...counts, orderingIndexReady, sequenceOrderingIndexReady,
     blockers: [...(counts.orphanRows ? ['orphan_history_requires_review'] : []),
-      ...(!orderingIndexReady ? ['ordering_index_requires_separate_review'] : [])],
+      ...(!orderingIndexReady ? ['ordering_index_requires_separate_review'] : []),
+      ...(!sequenceOrderingIndexReady ? ['sequence_ordering_index_requires_separate_review'] : [])],
     activationReady: false as const };
 }

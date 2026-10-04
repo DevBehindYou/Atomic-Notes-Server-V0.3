@@ -2410,6 +2410,8 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal(result.overLimitAccounts, baseline.overLimitAccounts + 1);
     assert.equal(result.orphanRows, baseline.orphanRows + 3);
     assert.equal(result.activationReady, false);
+    assert.equal(result.orderingIndexReady, false);
+    assert.equal(result.sequenceOrderingIndexReady, false);
     assert.ok(result.blockers.includes('orphan_history_requires_review'));
     const printed = JSON.stringify(result);
     for (const value of [account.id, orphanId, 'Private fixture text', db.databaseName]) assert.equal(printed.includes(value), false);
@@ -2417,6 +2419,23 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.deepEqual(await collections.energyLedger(db).indexes(), indexes);
     assert.deepEqual(await db.listCollections({}, { nameOnly: true }).toArray(), names);
     assert.deepEqual(await collections.atomicUsers(db).findOne({ _id: account.id }), wallet);
+    const fixtureNames = ['fixture_preflight_legacy_order', 'fixture_preflight_sequence_order'];
+    await collections.energyLedger(db).createIndex({ userId: 1, createdAt: -1, _id: -1 }, { name: fixtureNames[0] });
+    try {
+      await collections.energyLedger(db).createIndex({ userId: 1, historySequence: -1 }, { name: fixtureNames[1] });
+      try {
+        const readyIndexes = await collections.energyLedger(db).indexes();
+        const ready = await inspectLedgerRetention(db);
+        assert.equal(ready.orderingIndexReady, true); assert.equal(ready.sequenceOrderingIndexReady, true);
+        assert.equal(ready.activationReady, false, 'usable indexes do not authorize activation');
+        assert.equal(ready.rows, result.rows); assert.equal(ready.orphanRows, result.orphanRows);
+        assert.deepEqual(ready.blockers, ['orphan_history_requires_review']);
+        assert.deepEqual(await collections.energyLedger(db).indexes(), readyIndexes);
+        assert.deepEqual(await collections.energyLedger(db).find({}).sort({ _id: 1 }).toArray(), before);
+        assert.deepEqual(await collections.atomicUsers(db).findOne({ _id: account.id }), wallet);
+      } finally { await collections.energyLedger(db).dropIndex(fixtureNames[1]); }
+    } finally { await collections.energyLedger(db).dropIndex(fixtureNames[0]); }
+    assert.deepEqual(await collections.energyLedger(db).indexes(), indexes);
     await collections.energyLedger(db).deleteMany({ userId: { $in: [account.id, orphanId] } });
   });
 
