@@ -1743,6 +1743,7 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     await collections.atomicUsers(db).updateOne({ _id: legacy.id }, { $set: { coins: 40 } });
     const zero = await user();
     await collections.atomicUsers(db).updateOne({ _id: zero.id }, { $set: { coins: 0 } });
+    const evictionAccount = await user(); // Before activation: opening coins remain non-expiring.
     const priorLedger = await collections.energyLedger(db).countDocuments({ userId: legacy.id });
     process.env.COIN_EXPIRY_ACTIVATED_AT = '2026-01-01T00:00:00.000Z';
     ct.after(() => { delete process.env.COIN_EXPIRY_ACTIVATED_AT; });
@@ -1831,6 +1832,59 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
       assert.equal((await wallet(account.id)).noteLimit, 30);
       await reconcile(account.id);
     });
+    await ct.test('credit and conversion replay plus expiry survive eviction of their history rows', async () => {
+      const { archiveLedgerBatch } = await import('../src/lib/ledgerRetention');
+      const id = evictionAccount.id, creditId = randomUUID(), conversionId = randomUUID();
+      assert.equal((await adjust(id, 50, creditId)).status, 200);
+      await energyConvert(db, id, 1, conversionId);
+      const beforeWallet = await wallet(id), beforeLots = await lots(id);
+      const beforeOperations = await collections.coinOperations(db).find({ userId: id }).sort({ _id: 1 }).toArray();
+      const originalHistory = await collections.energyLedger(db).find({ userId: id }).toArray();
+      const credit = beforeLots.find(lot => lot.source === 'controller')!;
+      const legacyLot = beforeLots.find(lot => lot.source === 'legacy')!;
+      assert.equal(credit.remaining, 49); assert.equal(legacyLot.remaining, 5);
+      assert.equal(legacyLot.expiresAt, null);
+      assert.equal(credit.expiresAt!.toISOString(), coinExpiry(credit.creditedAt).toISOString());
+      const evict = async (newerThan: number) => {
+        await collections.energyLedger(db).insertMany(Array.from({ length: 60 }, () => ({
+          _id: randomUUID(), userId: id, kind: 'admin_adjust' as const, coinsDelta: 0, energyDelta: 0,
+          resultingCoins: 0, resultingEnergy: 0, note: 'Synthetic newer history', createdAt: new Date(newerThan + 1000),
+        })));
+        while (await withTransaction(session => archiveLedgerBatch(db, id, session, Date.now()))) { /* bounded batches */ }
+      };
+      await evict(Date.now());
+      assert.equal(await collections.energyLedger(db).countDocuments({ _id: { $in: originalHistory.map(row => row._id) } }), 0);
+      assert.deepEqual(await lots(id), beforeLots);
+      assert.deepEqual(await collections.coinOperations(db).find({ userId: id }).sort({ _id: 1 }).toArray(), beforeOperations);
+      const replays = await Promise.all([adjust(id, 50, creditId), adjust(id, 50, creditId)]);
+      assert.ok(replays.every(response => response.status === 200));
+      await Promise.all([energyConvert(db, id, 1, conversionId), energyConvert(db, id, 1, conversionId)]);
+      assert.equal((await adjust(id, 51, creditId)).status, 409);
+      await assert.rejects(energyConvert(db, id, 2, conversionId), /coin_request_mismatch/);
+      assert.deepEqual(await lots(id), beforeLots);
+      assert.equal((await wallet(id)).coins, beforeWallet.coins);
+      assert.equal((await wallet(id)).energy, beforeWallet.energy);
+      assert.equal((await wallet(id)).noteLimit, beforeWallet.noteLimit);
+      assert.deepEqual(await collections.coinOperations(db).find({ userId: id }).sort({ _id: 1 }).toArray(), beforeOperations);
+      const expire = () => withTransaction(async session => {
+        const current = (await collections.atomicUsers(db).findOne({ _id: id }, { session }))!;
+        await prepareCoinWallet(db, current, session, credit.expiresAt!);
+      });
+      await Promise.all([expire(), expire()]);
+      assert.equal((await wallet(id)).coins, 5);
+      assert.equal((await wallet(id)).energy, beforeWallet.energy);
+      assert.equal((await lots(id)).find(lot => lot._id === legacyLot._id)!.remaining, 5);
+      assert.equal((await lots(id)).find(lot => lot._id === credit._id)!.remaining, 0);
+      assert.equal(await collections.energyLedger(db).countDocuments({ userId: id, reason: 'coin_expired' }), 1);
+      await evict(credit.expiresAt!.getTime());
+      assert.equal(await collections.energyLedger(db).countDocuments({ userId: id, reason: 'coin_expired' }), 0);
+      await Promise.all([expire(), expire()]);
+      assert.equal((await wallet(id)).coins, 5);
+      assert.equal(await collections.energyLedger(db).countDocuments({ userId: id, reason: 'coin_expired' }), 0);
+      assert.equal((await lots(id)).find(lot => lot._id === credit._id)!.expiresAt!.getTime(), credit.expiresAt!.getTime());
+      await reconcile(id);
+    });
+
     await ct.test('parallel spends cannot use one coin twice; expired balances never authorize spending', async () => {
       assert.equal((await adjust(zero.id, 1)).status, 200);
       const outcomes = await Promise.allSettled([energyConvert(db, zero.id, 1, randomUUID()), energyConvert(db, zero.id, 1, randomUUID())]);
