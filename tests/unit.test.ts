@@ -360,10 +360,25 @@ test('statistics refuse historical queries older than their projection', () => {
   assert.throws(() => combineLedgerStatistics([], archived, statsTime - 1), /statistics_time_regression/);
 });
 
-import { ledgerInspectionArguments } from '../src/db/ledgerRetentionInspection';
+import { ledgerInspectionArguments, ledgerOrderingIndexReady } from '../src/db/ledgerRetentionInspection';
 test('ledger history inspection has no apply mode and refuses every unknown argument', () => {
   assert.equal(ledgerInspectionArguments([]), undefined);
   for (const args of [['--apply'], ['--apply', '--database', 'fixture'], ['--force'], ['--limit', '100'], ['--database', 'fixture']]) {
     assert.throws(() => ledgerInspectionArguments(args), /inspection only/);
+  }
+});
+
+test('ordering readiness requires full usable non-TTL indexes and legacy-compatible sequence uniqueness', () => {
+  for (const mode of ['legacy', 'sequence'] as const) {
+    const key = mode === 'legacy' ? { userId: 1, createdAt: -1, _id: -1 } : { userId: 1, historySequence: -1 };
+    assert.equal(ledgerOrderingIndexReady([], mode), false);
+    assert.equal(ledgerOrderingIndexReady([{ key }], mode), true);
+    assert.equal(ledgerOrderingIndexReady([{ key: { ...key, extra: 1 } }], mode), false);
+    assert.equal(ledgerOrderingIndexReady([{ key: Object.fromEntries(Object.entries(key).reverse()) }], mode), false);
+    for (const options of [{ partialFilterExpression: { historySequence: { $exists: true } } },
+      { sparse: true }, { hidden: true }, { collation: { locale: 'en' } }, { expireAfterSeconds: 0 }]) {
+      assert.equal(ledgerOrderingIndexReady([{ key, ...options }], mode), false);
+    }
+    assert.equal(ledgerOrderingIndexReady([{ key, unique: true }], mode), mode === 'legacy');
   }
 });
