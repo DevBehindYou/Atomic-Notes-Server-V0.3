@@ -3,7 +3,7 @@ import test from 'node:test';
 import { randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Hono } from 'hono';
-import { BSON } from 'mongodb';
+import { BSON, type Db } from 'mongodb';
 import { applySyncRetention, inspectSyncRetention } from '../src/db/syncRetention';
 
 // This suite creates and drops only its own database on a disposable local runner.
@@ -313,6 +313,170 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
       assert.equal(view.coins_granted_24h - before.coins_granted_24h, credits);
       assert.equal(view.energy_spent_24h, before.energy_spent_24h);
     }
+  });
+
+  await t.test('retention inspection reports over-limit and orphan rows without changing data or indexes', async () => {
+    const { inspectLedgerRetention } = await import('../src/db/ledgerRetentionInspection');
+    const baseline = await inspectLedgerRetention(db);
+    const account = await user(), orphanId = randomUUID();
+    await collections.energyLedger(db).deleteMany({ userId: account.id });
+    const entry = (userId: string) => ({ _id: randomUUID(), userId, kind: 'admin_adjust' as const,
+      coinsDelta: 0, energyDelta: 0, resultingCoins: 0, resultingEnergy: 0, note: 'Private fixture text', createdAt: new Date() });
+    await collections.energyLedger(db).insertMany([...Array.from({ length: 51 }, () => entry(account.id)), ...Array.from({ length: 3 }, () => entry(orphanId))]);
+    const before = await collections.energyLedger(db).find({}).sort({ _id: 1 }).toArray();
+    const names = await db.listCollections({}, { nameOnly: true }).toArray();
+    const indexes = await collections.energyLedger(db).indexes();
+    const wallet = await collections.atomicUsers(db).findOne({ _id: account.id });
+    const result = await inspectLedgerRetention(db);
+    assert.equal(result.rows, baseline.rows + 54);
+    assert.equal(result.accounts, baseline.accounts + 2);
+    assert.equal(result.removableRows, baseline.removableRows + 1);
+    assert.equal(result.overLimitAccounts, baseline.overLimitAccounts + 1);
+    assert.equal(result.orphanRows, baseline.orphanRows + 3);
+    assert.equal(result.activationReady, false);
+    assert.equal(result.orderingIndexReady, false);
+    assert.equal(result.sequenceOrderingIndexReady, false);
+    assert.ok(result.blockers.includes('orphan_history_requires_review'));
+    const printed = JSON.stringify(result);
+    for (const value of [account.id, orphanId, 'Private fixture text', db.databaseName]) assert.equal(printed.includes(value), false);
+    assert.deepEqual(await collections.energyLedger(db).find({}).sort({ _id: 1 }).toArray(), before);
+    assert.deepEqual(await collections.energyLedger(db).indexes(), indexes);
+    assert.deepEqual(await db.listCollections({}, { nameOnly: true }).toArray(), names);
+    assert.deepEqual(await collections.atomicUsers(db).findOne({ _id: account.id }), wallet);
+    const fixtureNames = ['fixture_preflight_legacy_order', 'fixture_preflight_sequence_order'];
+    await collections.energyLedger(db).createIndex({ userId: 1, createdAt: -1, _id: -1 }, { name: fixtureNames[0] });
+    try {
+      await collections.energyLedger(db).createIndex({ userId: 1, historySequence: -1 }, { name: fixtureNames[1] });
+      try {
+        const readyIndexes = await collections.energyLedger(db).indexes();
+        const ready = await inspectLedgerRetention(db);
+        assert.equal(ready.orderingIndexReady, true); assert.equal(ready.sequenceOrderingIndexReady, true);
+        assert.equal(ready.activationReady, false, 'usable indexes do not authorize activation');
+        assert.equal(ready.rows, result.rows); assert.equal(ready.orphanRows, result.orphanRows);
+        assert.deepEqual(ready.blockers, ['orphan_history_requires_review']);
+        assert.deepEqual(await collections.energyLedger(db).indexes(), readyIndexes);
+        assert.deepEqual(await collections.energyLedger(db).find({}).sort({ _id: 1 }).toArray(), before);
+        assert.deepEqual(await collections.atomicUsers(db).findOne({ _id: account.id }), wallet);
+      } finally { await collections.energyLedger(db).dropIndex(fixtureNames[1]); }
+    } finally { await collections.energyLedger(db).dropIndex(fixtureNames[0]); }
+    assert.deepEqual(await collections.energyLedger(db).indexes(), indexes);
+    await collections.energyLedger(db).deleteMany({ userId: { $in: [account.id, orphanId] } });
+  });
+
+  await t.test('integrity preflight counts anomalies without exposing or changing their records', async () => {
+    const { inspectLedgerRetention } = await import('../src/db/ledgerRetentionInspection');
+    const { inspectLedgerIntegrity } = await import('../src/db/ledgerIntegrityInspection');
+    const baseline = await inspectLedgerRetention(db);
+    const accounts = await Promise.all(Array.from({ length: 9 }, () => user()));
+    const [valid, excess, duplicate, gap, missingCounter, partial, unsupported, deepLegacy, empty] = accounts;
+    const rawWallets = db.collection<{ _id: string; [key: string]: unknown }>('atomic_users');
+    const rawRows = db.collection<{ _id: string; [key: string]: unknown }>('energy_ledger');
+    const invalidOwner = 'private-invalid-wallet-id';
+    await rawWallets.insertOne({ _id: invalidOwner } as any);
+    const entry = (userId: string, historySequence?: number) => ({ _id: randomUUID(), userId,
+      kind: 'admin_adjust', coinsDelta: 0, energyDelta: 0, resultingCoins: 5, resultingEnergy: 0,
+      note: 'Private integrity fixture', createdAt: new Date(), ...(historySequence === undefined ? {} : { historySequence }) });
+    for (const [account, sequences, counter] of [[valid, Array.from({ length: 50 }, (_, i) => 51 + i), 100],
+      [excess, Array.from({ length: 51 }, (_, i) => i + 1), 51], [duplicate, [2, 2], 2], [gap, [1, 3], 3],
+      [empty, [], 0]] as const) {
+      await rawRows.deleteMany({ userId: account.id });
+      if (sequences.length) await rawRows.insertMany(sequences.map(sequence => entry(account.id, sequence)));
+      await rawWallets.updateOne({ _id: account.id } as any, { $set: { historyRetentionVersion: 1, historySequence: counter } });
+    }
+    await rawWallets.updateOne({ _id: missingCounter.id } as any, { $set: { historyRetentionVersion: 1 } });
+    await rawWallets.updateOne({ _id: partial.id } as any, { $set: { historySequence: 7 } });
+    await rawWallets.updateOne({ _id: unsupported.id } as any, { $set: { historyRetentionVersion: 2 } });
+    await rawRows.insertMany([...Array.from({ length: 60 }, () => entry(deepLegacy.id)), entry(deepLegacy.id, 20)]);
+    const orphanId = randomUUID();
+    await rawRows.insertMany([{ ...entry(partial.id), energyDelta: 'malformed-private-value' },
+      { ...entry(orphanId), createdAt: 'invalid-private-date' }, entry(orphanId)]);
+    const beforeRows = await rawRows.find({}).sort({ _id: 1 }).toArray();
+    const beforeWallets = await rawWallets.find({}).sort({ _id: 1 }).toArray();
+    const beforeCatalog = await db.listCollections({}, { nameOnly: true }).toArray();
+    const beforeIndexes = await rawRows.indexes();
+    const result = await inspectLedgerRetention(db);
+    assert.equal(result.walletAccounts, baseline.walletAccounts + 10);
+    assert.equal(result.invalidWalletIdentities, baseline.invalidWalletIdentities + 1);
+    assert.equal(result.orderedAccounts, baseline.orderedAccounts + 6);
+    assert.equal(result.partialWalletAccounts, baseline.partialWalletAccounts + 2);
+    assert.equal(result.invalidOrderedAccounts, baseline.invalidOrderedAccounts + 3);
+    assert.equal(result.overLimitOrderedAccounts, baseline.overLimitOrderedAccounts + 1);
+    assert.equal(result.malformedRows, baseline.malformedRows + 2);
+    assert.equal(result.orphanRows, baseline.orphanRows + 2);
+    assert.equal(result.sequencedUnmarkedRows, baseline.sequencedUnmarkedRows + 1);
+    assert.equal(result.activationReady, false);
+    for (const blocker of ['malformed_history_requires_review', 'wallet_metadata_requires_review',
+      'ordered_history_requires_review', 'unmarked_sequence_rows_require_review', 'orphan_history_requires_review']) {
+      assert.ok(result.blockers.includes(blocker));
+    }
+    const printed = JSON.stringify(result);
+    for (const value of [...accounts.map(account => account.id), orphanId, invalidOwner, db.databaseName,
+      'Private integrity fixture', 'malformed-private-value', 'invalid-private-date']) assert.equal(printed.includes(value), false);
+    assert.deepEqual(await rawRows.find({}).sort({ _id: 1 }).toArray(), beforeRows);
+    assert.deepEqual(await rawWallets.find({}).sort({ _id: 1 }).toArray(), beforeWallets);
+    assert.deepEqual(await rawRows.indexes(), beforeIndexes);
+    assert.deepEqual(await db.listCollections({}, { nameOnly: true }).toArray(), beforeCatalog);
+    await withTransaction(async session => {
+      await session.abortTransaction();
+      await assert.rejects(() => inspectLedgerIntegrity(db, session), /transaction_required/);
+    });
+    await rawRows.deleteMany({ userId: { $in: [...accounts.map(account => account.id), orphanId] } });
+    await rawWallets.deleteMany({ _id: { $in: [...accounts.map(account => account.id), invalidOwner] } } as any);
+  });
+
+  await t.test('preflight counts and integrity use one snapshot while a credit and metadata change commit', async () => {
+    const { inspectLedgerRetention } = await import('../src/db/ledgerRetentionInspection');
+    const account = await user(), before = await inspectLedgerRetention(db);
+    let signal!: () => void, release!: () => void, anchored = false;
+    const reached = new Promise<void>(resolve => { signal = resolve; });
+    const resume = new Promise<void>(resolve => { release = resolve; });
+    const pausedDb = new Proxy(db, {
+      get(target, property) {
+        if (property === 'collection') return (name: string) => {
+          const collection = target.collection(name);
+          return new Proxy(collection, {
+            get(current, method) {
+              if (name === 'energy_ledger' && method === 'aggregate' && !anchored) return (...args: any[]) => {
+                anchored = true;
+                const cursor = (current.aggregate as any)(...args);
+                return new Proxy(cursor, {
+                  get(currentCursor, cursorMethod) {
+                    if (cursorMethod === 'toArray') return async () => {
+                      const result = await currentCursor.toArray(); signal(); await resume; return result;
+                    };
+                    const value = Reflect.get(currentCursor, cursorMethod);
+                    return typeof value === 'function' ? value.bind(currentCursor) : value;
+                  },
+                });
+              };
+              const value = Reflect.get(current, method);
+              return typeof value === 'function' ? value.bind(current) : value;
+            },
+          });
+        };
+        const value = Reflect.get(target, property);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as Db;
+    const reading = inspectLedgerRetention(pausedDb);
+    let snapshot: Awaited<ReturnType<typeof inspectLedgerRetention>> | undefined;
+    let readError: unknown;
+    void reading.catch(error => { readError = error; signal(); });
+    try {
+      await reached;
+      if (readError) throw readError;
+      assert.equal((await request('/admin/energy', 'POST', { user_id: account.id, coins_delta: 0,
+        energy_delta: 1, request_id: randomUUID() }, undefined, 'test-admin-key')).status, 200);
+      await db.collection('atomic_users').updateOne({ _id: account.id } as any,
+        { $set: { historyRetentionVersion: 1, historySequence: 2 } }); // Deliberately damaged fixture after the credit.
+    } finally { release(); snapshot = await reading; }
+    assert.deepEqual(snapshot, before, 'every data section must retain the earlier snapshot');
+    const current = await inspectLedgerRetention(db);
+    assert.equal(current.rows, before.rows + 1);
+    assert.equal(current.orderedAccounts, before.orderedAccounts + 1);
+    assert.equal(current.invalidOrderedAccounts, before.invalidOrderedAccounts + 1);
+    await db.collection('atomic_users').updateOne({ _id: account.id } as any,
+      { $unset: { historyRetentionVersion: '', historySequence: '' } });
   });
 
   await t.test('global Controller financial totals stay identical after account history cleanup', async () => {
