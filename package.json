@@ -9,6 +9,7 @@
     "build": "tsc",
     "db:indexes": "node --env-file-if-exists=.env --import tsx src/scripts/ensureIndexes.ts",
     "db:retain-sync-history": "node --env-file-if-exists=.env --import tsx src/scripts/retainSyncHistory.ts",
+    "db:inspect-ledger-history": "node --env-file-if-exists=.env --import tsx src/scripts/inspectLedgerHistory.ts",
     "db:inspect": "node --env-file-if-exists=.env --import tsx src/scripts/inspectUser.ts",
     "notifications:welcome": "node --env-file-if-exists=.env --import tsx src/scripts/publishWelcome.ts",
     "typecheck": "tsc --noEmit -p tsconfig.test.json",

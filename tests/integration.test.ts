@@ -312,6 +312,35 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     }
   });
 
+  await t.test('retention inspection reports over-limit and orphan rows without changing data or indexes', async () => {
+    const { inspectLedgerRetention } = await import('../src/db/ledgerRetentionInspection');
+    const baseline = await inspectLedgerRetention(db);
+    const account = await user(), orphanId = randomUUID();
+    await collections.energyLedger(db).deleteMany({ userId: account.id });
+    const entry = (userId: string) => ({ _id: randomUUID(), userId, kind: 'admin_adjust' as const,
+      coinsDelta: 0, energyDelta: 0, resultingCoins: 0, resultingEnergy: 0, note: 'Private fixture text', createdAt: new Date() });
+    await collections.energyLedger(db).insertMany([...Array.from({ length: 51 }, () => entry(account.id)), ...Array.from({ length: 3 }, () => entry(orphanId))]);
+    const before = await collections.energyLedger(db).find({}).sort({ _id: 1 }).toArray();
+    const names = await db.listCollections({}, { nameOnly: true }).toArray();
+    const indexes = await collections.energyLedger(db).indexes();
+    const wallet = await collections.atomicUsers(db).findOne({ _id: account.id });
+    const result = await inspectLedgerRetention(db);
+    assert.equal(result.rows, baseline.rows + 54);
+    assert.equal(result.accounts, baseline.accounts + 2);
+    assert.equal(result.removableRows, baseline.removableRows + 1);
+    assert.equal(result.overLimitAccounts, baseline.overLimitAccounts + 1);
+    assert.equal(result.orphanRows, baseline.orphanRows + 3);
+    assert.equal(result.activationReady, false);
+    assert.ok(result.blockers.includes('orphan_history_requires_review'));
+    const printed = JSON.stringify(result);
+    for (const value of [account.id, orphanId, 'Private fixture text', db.databaseName]) assert.equal(printed.includes(value), false);
+    assert.deepEqual(await collections.energyLedger(db).find({}).sort({ _id: 1 }).toArray(), before);
+    assert.deepEqual(await collections.energyLedger(db).indexes(), indexes);
+    assert.deepEqual(await db.listCollections({}, { nameOnly: true }).toArray(), names);
+    assert.deepEqual(await collections.atomicUsers(db).findOne({ _id: account.id }), wallet);
+    await collections.energyLedger(db).deleteMany({ userId: { $in: [account.id, orphanId] } });
+  });
+
   await t.test('owner isolation, partial updates and failed pushes', async () => {
     const original = row(); assert.equal((await push([original])).status, 200);
     const before = writes;
