@@ -2184,4 +2184,41 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     }
   });
 
+  await t.test('disposable migration resumes from an atomic checkpoint after a lost response', async () => {
+    const { rehearseLedgerMigration } = await import('./ledgerMigrationHarness');
+    const { readRetainedLedgerStatistics } = await import('../src/lib/ledgerRetention');
+    const a = await user(), b = await user(), untouched = await user(), at = Date.now();
+    for (const [account, size] of [[a, 355], [b, 151]] as const) {
+      await collections.energyLedger(db).deleteMany({ userId: account.id });
+      await collections.energyLedger(db).insertMany(Array.from({ length: size }, (_, i) => ({
+        _id: randomUUID(), userId: account.id, kind: 'admin_adjust' as const,
+        coinsDelta: i % 2 ? -1 : 2, energyDelta: i % 3 ? -5 : 10,
+        resultingCoins: 5, resultingEnergy: 0, note: 'Migration fixture', createdAt: new Date(at - i),
+      })));
+    }
+    const totals = await Promise.all([a, b].map(account => readRetainedLedgerStatistics(db, account.id, at)));
+    const balances = await Promise.all([a, b].map(account => collections.atomicUsers(db).findOne({ _id: account.id })));
+    const sentinel = await collections.energyLedger(db).find({ userId: untouched.id }).toArray();
+    const options = { expectedDatabase: databaseName, runId: randomUUID(), users: [a.id, b.id], asOf: at, batchBudget: 1 };
+    await assert.rejects(() => rehearseLedgerMigration(db, { ...options, expectedDatabase: 'atomic_notes' }), /database_mismatch/);
+    await assert.rejects(() => rehearseLedgerMigration(db, { ...options, users: [a.id, a.id] }), /invalid_migration/);
+    await assert.rejects(() => rehearseLedgerMigration(db, { ...options, afterCommit: async () => { throw new Error('fixture_lost_checkpoint_response'); } }), /lost_checkpoint_response/);
+    assert.equal(await collections.energyLedger(db).countDocuments({ userId: a.id }), 255);
+    await assert.rejects(() => rehearseLedgerMigration(db, { ...options, users: [b.id, a.id] }), /plan_mismatch/);
+    await assert.rejects(() => rehearseLedgerMigration(db, { ...options, asOf: at + 1 }), /plan_mismatch/);
+    // Independent workers resume the same fixed plan; checkpoint and pruning contend atomically.
+    await Promise.all([rehearseLedgerMigration(db, { ...options, batchBudget: 2 }), rehearseLedgerMigration(db, { ...options, batchBudget: 2 })]);
+    const done = await rehearseLedgerMigration(db, { ...options, batchBudget: 10 });
+    assert.equal(done.completed, true); assert.equal(done.removed, 406);
+    const repeated = await rehearseLedgerMigration(db, { ...options, batchBudget: 10 });
+    assert.deepEqual(repeated, done);
+    for (const [i, account] of [a, b].entries()) {
+      assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id }), 50);
+      assert.deepEqual(await readRetainedLedgerStatistics(db, account.id, at), totals[i]);
+      const current = (await collections.atomicUsers(db).findOne({ _id: account.id }))!;
+      assert.equal(current.coins, balances[i]!.coins); assert.equal(current.energy, balances[i]!.energy);
+    }
+    assert.deepEqual(await collections.energyLedger(db).find({ userId: untouched.id }).toArray(), sentinel);
+  });
+
 });
