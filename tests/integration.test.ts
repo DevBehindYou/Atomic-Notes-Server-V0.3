@@ -2267,4 +2267,18 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal(laterTotals.ledger_by_kind.admin_adjust, 51); assert.equal(laterTotals.coins_granted_24h, 1);
   });
 
+  await t.test('initialization refuses partial wallet sequence metadata without resetting it', async () => {
+    const { initializeLedgerSequence } = await import('../src/lib/ledgerSequence');
+    for (const fields of [{ historySequence: 12 }, { historyRetentionVersion: 2 }]) {
+      const account = await user();
+      // Deliberately bypass the type contract to model interrupted/manual historical metadata.
+      await db.collection('atomic_users').updateOne({ _id: account.id } as any, { $set: fields });
+      const beforeWallet = await collections.atomicUsers(db).findOne({ _id: account.id });
+      const beforeRows = await collections.energyLedger(db).find({ userId: account.id }).toArray();
+      await assert.rejects(() => withTransaction(session => initializeLedgerSequence(db, account.id, session)), /partial_sequence_migration/);
+      assert.deepEqual(await collections.atomicUsers(db).findOne({ _id: account.id }), beforeWallet);
+      assert.deepEqual(await collections.energyLedger(db).find({ userId: account.id }).toArray(), beforeRows);
+    }
+  });
+
 });
