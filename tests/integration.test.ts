@@ -2221,4 +2221,34 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.deepEqual(await collections.energyLedger(db).find({ userId: untouched.id }).toArray(), sentinel);
   });
 
+  await t.test('cleanup refuses malformed selected records and rolls back every financial effect', async () => {
+    const { archiveLedgerBatch, ledgerArchives, ledgerRecent } = await import('../src/lib/ledgerRetention');
+    const account = await user(), col = db.collection<{ _id: string; [key: string]: unknown }>('energy_ledger');
+    const at = Date.now();
+    const entry = () => ({ _id: randomUUID(), userId: account.id, kind: 'admin_adjust', coinsDelta: 0,
+      energyDelta: 0, resultingCoins: 5, resultingEnergy: 0, note: 'Synthetic guarded history', createdAt: new Date(at) });
+    for (const fields of [{ coinsDelta: '7' }, { kind: 'unexpected_kind' }, { note: { private: 'fixture text' } },
+      { _id: 'private-invalid-event' }, { createdAt: 'invalid-private-date' }]) {
+      await col.deleteMany({ userId: account.id });
+      await col.insertMany([...Array.from({ length: 50 }, entry), { ...entry(), createdAt: new Date(at - 1000), ...fields }]);
+      const wallet = await collections.atomicUsers(db).findOne({ _id: account.id });
+      const history = await col.find({ userId: account.id }).sort({ _id: 1 }).toArray();
+      const archive = await ledgerArchives(db).findOne({ _id: account.id });
+      const recent = await ledgerRecent(db).find({ userId: account.id }).toArray();
+      await assert.rejects(() => withTransaction(async session => {
+        await collections.atomicUsers(db).updateOne({ _id: account.id }, { $inc: { energy: 1 } }, { session });
+        await archiveLedgerBatch(db, account.id, session, at);
+      }), /malformed_ledger_history/);
+      assert.deepEqual(await collections.atomicUsers(db).findOne({ _id: account.id }), wallet);
+      assert.deepEqual(await col.find({ userId: account.id }).sort({ _id: 1 }).toArray(), history);
+      assert.deepEqual(await ledgerArchives(db).findOne({ _id: account.id }), archive);
+      assert.deepEqual(await ledgerRecent(db).find({ userId: account.id }).toArray(), recent);
+    }
+    await col.deleteMany({ userId: account.id });
+    await col.insertMany(Array.from({ length: 51 }, entry));
+    assert.equal(await withTransaction(session => archiveLedgerBatch(db, account.id, session, at)), 1,
+      'a valid boundary batch still archives exactly one record');
+    assert.equal(await col.countDocuments({ userId: account.id }), 50);
+  });
+
 });
