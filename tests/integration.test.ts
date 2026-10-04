@@ -2123,8 +2123,8 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
       await initializeLedgerSequence(db, account.id, session);
     });
     process.env.COIN_EXPIRY_ACTIVATED_AT = '2026-01-01T00:00:00.000Z';
-    const adjust = (coins: number, requestId: string) => request('/admin/energy', 'POST', {
-      user_id: account.id, coins_delta: coins, energy_delta: 0, request_id: requestId,
+    const adjust = (coins: number, requestId: string, energy = 0) => request('/admin/energy', 'POST', {
+      user_id: account.id, coins_delta: coins, energy_delta: energy, request_id: requestId,
     }, undefined, 'test-admin-key');
     const creditIds = [randomUUID(), randomUUID()], convertId = randomUUID(), capacityId = randomUUID();
     for (const id of creditIds) assert.equal((await adjust(100, id)).status, 200);
@@ -2159,12 +2159,13 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id }), 50);
     assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id, reason: 'coin_expired' }), 2);
     const originalOperations = await collections.coinOperations(db).find({ userId: account.id }).sort({ _id: 1 }).toArray();
-    // Zero adjustments go through the real Controller route; sequences evict even future-dated expiry events.
-    for (let i = 0; i < 60; i++) assert.equal((await adjust(0, randomUUID())).status, 200);
+    // Valid one-energy grants use the real Controller route; sequences evict even future-dated expiry events.
+    for (let i = 0; i < 60; i++) assert.equal((await adjust(0, randomUUID(), 1)).status, 200);
     assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id }), 50);
     assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id, reason: 'coin_expired' }), 0);
     assert.equal(await collections.energyLedger(db).countDocuments({ userId: account.id, kind: { $in: ['spend', 'convert', 'purchase', 'daily_grant'] } }), 0);
     const beforeReplay = (await collections.atomicUsers(db).findOne({ _id: account.id }))!;
+    assert.equal(beforeReplay.energy, 110);
     const lotsAtReplay = await collections.coinLots(db).find({ userId: account.id }).sort({ _id: 1 }).toArray();
     const commands = writes;
     for (const id of creditIds) assert.equal((await adjust(100, id)).status, 200);
@@ -2193,6 +2194,77 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal(state.status, 200);
     const body = await state.json() as { history: unknown[] };
     assert.equal(body.history.length, 50);
+  });
+
+  await t.test('migration racing a legacy wallet snapshot retries before appending and preserves the credit', async () => {
+    const { initializeLedgerSequence } = await import('../src/lib/ledgerSequence');
+    const { archiveLedgerBatch, readRetainedLedgerStatistics } = await import('../src/lib/ledgerRetention');
+    const { energyHistory } = await import('../src/lib/energy');
+    const fixture = async () => {
+      const account = await user();
+      await collections.energyLedger(db).deleteMany({ userId: account.id });
+      await collections.energyLedger(db).insertMany(Array.from({ length: 50 }, () => ({ _id: randomUUID(),
+        userId: account.id, kind: 'admin_adjust' as const, coinsDelta: 0, energyDelta: 0,
+        resultingCoins: 5, resultingEnergy: 0, note: 'Migration race fixture', createdAt: new Date(Date.now() - 1000) })));
+      return account;
+    };
+    const account = await fixture();
+    let attempts = 0, signalRead!: () => void, releaseWrite!: () => void;
+    const reachedRead = new Promise<void>(resolve => { signalRead = resolve; });
+    const canWrite = new Promise<void>(resolve => { releaseWrite = resolve; });
+    const markers: (number | undefined)[] = [];
+    const writeId = randomUUID();
+    const writing = withTransaction(async session => {
+      attempts++;
+      const snapshot = (await collections.atomicUsers(db).findOne({ _id: account.id }, { session }))!;
+      markers.push(snapshot.historyRetentionVersion);
+      if (attempts === 1) { signalRead(); await canWrite; }
+      const changed = (await collections.atomicUsers(db).findOneAndUpdate({ _id: account.id },
+        { $inc: { coins: 1 } }, { session, returnDocument: 'after' }))!;
+      await appendLedger(db, session, { _id: writeId, userId: account.id, kind: 'admin_adjust', coinsDelta: 1,
+        energyDelta: 0, resultingCoins: changed.coins, resultingEnergy: changed.energy,
+        note: 'Credit crossing migration', createdAt: new Date() }, snapshot);
+    });
+    // Attach a handler immediately, so a setup failure cannot leave the read gate waiting indefinitely.
+    let writeError: unknown;
+    void writing.catch(error => { writeError = error; signalRead(); });
+    try {
+      await reachedRead;
+      if (writeError) throw writeError;
+      await withTransaction(session => initializeLedgerSequence(db, account.id, session));
+    } finally { releaseWrite(); await writing; }
+    assert.ok(attempts >= 2, 'stale wallet transaction must retry');
+    assert.equal(markers[0], undefined);
+    assert.ok(markers.slice(1).every(marker => marker === 1));
+    const wallet = (await collections.atomicUsers(db).findOne({ _id: account.id }))!;
+    assert.equal(wallet.coins, 6); assert.equal(wallet.historySequence, 51);
+    const history = await energyHistory(db, account.id);
+    assert.equal(history.length, 50); assert.equal(history[0]._id, writeId);
+    const totals = await readRetainedLedgerStatistics(db, account.id, Date.now());
+    assert.equal(totals.ledger_by_kind.admin_adjust, 51); assert.equal(totals.coins_granted_24h, 1);
+
+    // Opposite ordering: the legacy writer commits first. Migration refuses 51 rows and requires final cleanup.
+    const earlier = await fixture(), earlierId = randomUUID();
+    await withTransaction(async session => {
+      const snapshot = (await collections.atomicUsers(db).findOne({ _id: earlier.id }, { session }))!;
+      await collections.atomicUsers(db).updateOne({ _id: earlier.id }, { $inc: { coins: 1 } }, { session });
+      await appendLedger(db, session, { _id: earlierId, userId: earlier.id, kind: 'admin_adjust', coinsDelta: 1,
+        energyDelta: 0, resultingCoins: 6, resultingEnergy: 0, note: 'Credit before migration', createdAt: new Date() }, snapshot);
+    });
+    const beforeMigration = await collections.atomicUsers(db).findOne({ _id: earlier.id });
+    await assert.rejects(() => withTransaction(session => initializeLedgerSequence(db, earlier.id, session)), /migration_required/);
+    assert.deepEqual(await collections.atomicUsers(db).findOne({ _id: earlier.id }), beforeMigration);
+    assert.equal(await collections.energyLedger(db).countDocuments({ userId: earlier.id }), 51);
+    await withTransaction(async session => {
+      await archiveLedgerBatch(db, earlier.id, session, Date.now());
+      await initializeLedgerSequence(db, earlier.id, session);
+    });
+    const migrated = (await collections.atomicUsers(db).findOne({ _id: earlier.id }))!;
+    assert.equal(migrated.coins, 6); assert.equal(migrated.historySequence, 50);
+    const laterHistory = await energyHistory(db, earlier.id);
+    assert.equal(laterHistory.length, 50); assert.equal(laterHistory[0]._id, earlierId);
+    const laterTotals = await readRetainedLedgerStatistics(db, earlier.id, Date.now());
+    assert.equal(laterTotals.ledger_by_kind.admin_adjust, 51); assert.equal(laterTotals.coins_granted_24h, 1);
   });
 
 });
