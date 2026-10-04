@@ -3,7 +3,7 @@ import test from 'node:test';
 import { randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Hono } from 'hono';
-import { BSON } from 'mongodb';
+import { BSON, type Db } from 'mongodb';
 import { applySyncRetention, inspectSyncRetention } from '../src/db/syncRetention';
 
 // This suite creates and drops only its own database on a disposable local runner.
@@ -419,6 +419,61 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     });
     await rawRows.deleteMany({ userId: { $in: [...accounts.map(account => account.id), orphanId] } });
     await rawWallets.deleteMany({ _id: { $in: [...accounts.map(account => account.id), invalidOwner] } } as any);
+  });
+
+  await t.test('preflight counts and integrity use one snapshot while a credit and metadata change commit', async () => {
+    const { inspectLedgerRetention } = await import('../src/db/ledgerRetentionInspection');
+    const account = await user(), before = await inspectLedgerRetention(db);
+    let signal!: () => void, release!: () => void, anchored = false;
+    const reached = new Promise<void>(resolve => { signal = resolve; });
+    const resume = new Promise<void>(resolve => { release = resolve; });
+    const pausedDb = new Proxy(db, {
+      get(target, property) {
+        if (property === 'collection') return (name: string) => {
+          const collection = target.collection(name);
+          return new Proxy(collection, {
+            get(current, method) {
+              if (name === 'energy_ledger' && method === 'aggregate' && !anchored) return (...args: any[]) => {
+                anchored = true;
+                const cursor = (current.aggregate as any)(...args);
+                return new Proxy(cursor, {
+                  get(currentCursor, cursorMethod) {
+                    if (cursorMethod === 'toArray') return async () => {
+                      const result = await currentCursor.toArray(); signal(); await resume; return result;
+                    };
+                    const value = Reflect.get(currentCursor, cursorMethod);
+                    return typeof value === 'function' ? value.bind(currentCursor) : value;
+                  },
+                });
+              };
+              const value = Reflect.get(current, method);
+              return typeof value === 'function' ? value.bind(current) : value;
+            },
+          });
+        };
+        const value = Reflect.get(target, property);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as Db;
+    const reading = inspectLedgerRetention(pausedDb);
+    let snapshot: Awaited<ReturnType<typeof inspectLedgerRetention>> | undefined;
+    let readError: unknown;
+    void reading.catch(error => { readError = error; signal(); });
+    try {
+      await reached;
+      if (readError) throw readError;
+      assert.equal((await request('/admin/energy', 'POST', { user_id: account.id, coins_delta: 0,
+        energy_delta: 1, request_id: randomUUID() }, undefined, 'test-admin-key')).status, 200);
+      await db.collection('atomic_users').updateOne({ _id: account.id } as any,
+        { $set: { historyRetentionVersion: 1, historySequence: 2 } }); // Deliberately damaged fixture after the credit.
+    } finally { release(); snapshot = await reading; }
+    assert.deepEqual(snapshot, before, 'every data section must retain the earlier snapshot');
+    const current = await inspectLedgerRetention(db);
+    assert.equal(current.rows, before.rows + 1);
+    assert.equal(current.orderedAccounts, before.orderedAccounts + 1);
+    assert.equal(current.invalidOrderedAccounts, before.invalidOrderedAccounts + 1);
+    await db.collection('atomic_users').updateOne({ _id: account.id } as any,
+      { $unset: { historyRetentionVersion: '', historySequence: '' } });
   });
 
   await t.test('owner isolation, partial updates and failed pushes', async () => {
