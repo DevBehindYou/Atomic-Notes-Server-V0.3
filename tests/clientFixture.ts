@@ -56,6 +56,7 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
     const { encryptToken } = await import('../src/lib/crypto.js');
     const { energyEnsure } = await import('../src/lib/energy.js');
     const { createNotesRoute } = await import('../src/routes/notes.js');
+    const { default: authRoute } = await import('../src/routes/auth.js');
     const { registerErrorHandler } = await import('../src/middleware/errorHandler.js');
     await ensureIndexes(db);
     const owner = randomUUID(), other = randomUUID(), batchOwner = randomUUID();
@@ -123,6 +124,9 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
     const app = new Hono();
     registerErrorHandler(app);
     app.route('/api/notes', createNotesRoute(drive));
+    // The real logout route performs only session revocation/logging. Google
+    // sign-in routes are not invoked by this synthetic-session harness.
+    app.route('/api/auth', authRoute);
     // Read-only fixture diagnostics. No such endpoints exist in production.
     app.get('/__fixture/ready', (c) => c.json({ owner, other, batchOwner, database }));
     // Fault controls exist only in this guarded loopback test assembly.
