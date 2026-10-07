@@ -90,3 +90,11 @@ jobs:
           path: ci-encrypted-payload-proof.json
           if-no-files-found: ignore
           retention-days: 7
+      - name: Upload sanitized cross-store characterization
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitized-cross-store-proof
+          path: ci-cross-store-proof.json
+          if-no-files-found: ignore
+          retention-days: 7
