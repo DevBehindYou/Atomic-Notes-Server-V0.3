@@ -13,6 +13,7 @@ import { fixtureFailureIds, fixtureReadFault, fixtureRefundFault } from './clien
 export const FIXTURE_TOKENS = {
   a: 'atomic-disposable-client-a', b: 'atomic-disposable-client-b', other: 'atomic-disposable-other',
   batch: 'atomic-disposable-batch',
+  encrypted: 'atomic-disposable-encrypted',
 } as const;
 let started = false;
 // Deliberately public, usable only in this guarded generated test process.
@@ -63,8 +64,8 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
     const { default: adminRoute } = await import('../src/routes/admin.js');
     const { registerErrorHandler } = await import('../src/middleware/errorHandler.js');
     await ensureIndexes(db);
-    const owner = randomUUID(), other = randomUUID(), batchOwner = randomUUID();
-    for (const userId of [owner, other, batchOwner]) {
+    const owner = randomUUID(), other = randomUUID(), batchOwner = randomUUID(), encryptedOwner = randomUUID();
+    for (const userId of [owner, other, batchOwner, encryptedOwner]) {
       const now = new Date();
       await collections.users(db).insertOne({ _id: userId, email: `${userId}@example.test`, displayName: null, createdAt: now, updatedAt: now });
       await collections.googleAccounts(db).insertOne({ _id: randomUUID(), userId, googleAccountId: randomUUID(),
@@ -79,7 +80,7 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
     for (const [device, token] of Object.entries(FIXTURE_TOKENS)) {
       const now = new Date();
       await collections.sessions(db).insertOne({ _id: createHash('sha256').update(token).digest('hex'),
-        userId: device === 'other' ? other : device === 'batch' ? batchOwner : owner, createdAt: now,
+        userId: device === 'other' ? other : device === 'batch' ? batchOwner : device === 'encrypted' ? encryptedOwner : owner, createdAt: now,
         expiresAt: new Date(now.getTime() + 86400000), revoked: false, userAgent: 'disposable-fixture' });
     }
     const files = new Map<string, Record<string, unknown>>();
@@ -155,7 +156,7 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
     app.route('/api/auth', authRoute);
     app.route('/api/admin', adminRoute);
     // Read-only fixture diagnostics. No such endpoints exist in production.
-    app.get('/__fixture/ready', (c) => c.json({ owner, other, batchOwner, database }));
+    app.get('/__fixture/ready', (c) => c.json({ owner, other, batchOwner, encryptedOwner, database }));
     // Fault controls exist only in this guarded loopback test assembly.
     app.post('/__fixture/fail-writes', async (c) => {
       if (c.req.header('authorization') !== `Bearer ${FIXTURE_TOKENS.a}`) return c.json({ error: 'fixture_control_denied' }, 401);
@@ -180,7 +181,7 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
       return c.json({ armed: refundFault.mode !== 'none' });
     });
     app.get('/__fixture/state', async (c) => {
-      const users = await Promise.all([owner, other, batchOwner].map(async (userId) => ({
+      const users = await Promise.all([owner, other, batchOwner, encryptedOwner].map(async (userId) => ({
         userId,
         energy: (await collections.atomicUsers(db!).findOne({ _id: userId }))!.energy,
         notes: await collections.notes(db!).countDocuments({ userId, deleted: false }),
@@ -192,7 +193,7 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
     if (!server.listening) await once(server, 'listening');
     const address = server.address();
     if (!address || typeof address === 'string' || address.address !== '127.0.0.1') throw new Error('fixture_requires_loopback');
-    return { origin: `http://127.0.0.1:${address.port}`, database, owner, other, batchOwner, close };
+    return { origin: `http://127.0.0.1:${address.port}`, database, owner, other, batchOwner, encryptedOwner, close };
   } catch (error) {
     await close();
     throw error;

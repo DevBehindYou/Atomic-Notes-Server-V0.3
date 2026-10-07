@@ -79,5 +79,14 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Remove disposable MongoDB
+        # Test artifacts never contain raw assertions or payloads.
         if: always()
         run: docker rm -f atomic-test-mongo || true
+      - name: Upload sanitized encrypted payload proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitized-encrypted-payload-proof
+          path: ci-encrypted-payload-proof.json
+          if-no-files-found: ignore
+          retention-days: 7
