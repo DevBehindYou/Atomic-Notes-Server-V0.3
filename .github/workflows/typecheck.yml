@@ -98,3 +98,11 @@ jobs:
           path: ci-cross-store-proof.json
           if-no-files-found: ignore
           retention-days: 7
+      - name: Upload sanitized recovery contract proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitized-recovery-contract-proof
+          path: ci-recovery-contract-proof.json
+          if-no-files-found: ignore
+          retention-days: 7
