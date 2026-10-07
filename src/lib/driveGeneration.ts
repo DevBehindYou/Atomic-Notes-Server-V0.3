@@ -42,11 +42,17 @@ export async function createNoteGenerationWith(drive: drive_v3.Drive, fileId: st
     if (![e?.code, e?.status, e?.response?.status].some((code) => code === 409 || code === '409')) throw error;
     replayed = true;
   }
+  const actual = await readNoteGenerationWith(drive, fileId, parentId);
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error('generation_content_mismatch');
+  return { id: fileId, replayed };
+}
+
+/** Existing generation readback, without creating, overwriting or deleting. */
+export async function readNoteGenerationWith(drive: drive_v3.Drive, fileId: string, parentId: string): Promise<AtomicFileV1> {
+  if (!fileId || !parentId) throw new Error('generation_identity_invalid');
   const metadata = (await drive.files.get({ fileId, fields: 'id,parents,mimeType,trashed' })).data;
   if (metadata.id !== fileId || metadata.trashed || metadata.mimeType !== 'application/json' ||
       !metadata.parents?.includes(parentId)) throw new Error('generation_identity_mismatch');
   const raw = (await drive.files.get({ fileId, alt: 'media' }, { responseType: 'json' })).data;
-  const actual = checkedContent(raw);
-  if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error('generation_content_mismatch');
-  return { id: fileId, replayed };
+  return checkedContent(raw);
 }

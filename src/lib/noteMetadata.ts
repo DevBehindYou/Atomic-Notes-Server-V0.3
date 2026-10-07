@@ -1,4 +1,4 @@
-import type { Db, AnyBulkWriteOperation } from 'mongodb';
+import type { Db, AnyBulkWriteOperation, ClientSession } from 'mongodb';
 import { collections, type NoteDoc } from '../db/collections.js';
 import { withTransaction } from '../db/mongo.js';
 import { syncOperations } from './syncOperation.js';
@@ -67,66 +67,78 @@ export async function saveNoteMetadataBatch(
   operationId: string,
 ): Promise<{ saved: Map<string, NoteDoc>; notFound: string[] }> {
   if (entries.length === 0) return { saved: new Map(), notFound: [] };
-  return withTransaction(async (session) => {
-    const counter = await db.collection<{ _id: string; value: number }>('sync_counters').findOneAndUpdate(
-      { _id: userId }, { $inc: { value: entries.length } }, { upsert: true, returnDocument: 'after', session },
-    );
-    const firstSeq = counter!.value - entries.length + 1;
+  return withTransaction((session) => saveNoteMetadataBatchInSession(db, userId, entries, operationId, session));
+}
 
-    const saved = new Map<string, NoteDoc>();
-    const ops: AnyBulkWriteOperation<NoteDoc>[] = [];
-    const updateIds: string[] = [];
+/** Compose the existing batch mutation inside the caller's transaction.
+ * Caller owns session/fencing; this function never starts or commits a session.
+ */
+export async function saveNoteMetadataBatchInSession(
+  db: Db,
+  userId: string,
+  entries: NoteMetadataEntry[],
+  operationId: string,
+  session: ClientSession,
+): Promise<{ saved: Map<string, NoteDoc>; notFound: string[] }> {
+  if (entries.length === 0) return { saved: new Map(), notFound: [] };
+  const counter = await db.collection<{ _id: string; value: number }>('sync_counters').findOneAndUpdate(
+    { _id: userId }, { $inc: { value: entries.length } }, { upsert: true, returnDocument: 'after', session },
+  );
+  const firstSeq = counter!.value - entries.length + 1;
 
-    entries.forEach((entry, i) => {
-      const syncSequence = firstSeq + i;
-      if (entry.fresh) {
-        // Fresh notes may reuse an ID removed by a cloud wipe. The retained
-        // sequence prevents version regression without storing a tombstone.
-        const doc: NoteDoc = { ...entry.fresh, ...entry.fields, syncSequence, localVersion: syncSequence };
-        saved.set(entry.id, doc);
-        ops.push({ insertOne: { document: doc } });
-      } else {
-        const doc: NoteDoc = {
-          ...entry.existing!,
-          ...entry.fields,
-          syncSequence,
-          localVersion: entry.existing!.localVersion + 1,
-        };
-        saved.set(entry.id, doc);
-        updateIds.push(entry.id);
-        ops.push({
-          updateOne: {
-            filter: { _id: entry.id, userId },
-            update: { $set: { ...entry.fields, syncSequence }, $inc: { localVersion: 1 } },
-          },
-        });
-      }
-    });
+  const saved = new Map<string, NoteDoc>();
+  const ops: AnyBulkWriteOperation<NoteDoc>[] = [];
+  const updateIds: string[] = [];
 
-    await collections.notes(db).bulkWrite(ops, { session, ordered: false });
-
-    // A blind update reports no per-row match count; a follow-up read (inside the same
-    // transaction, so it sees the write just made) finds any target that had vanished.
-    if (updateIds.length > 0) {
-      const present = await collections.notes(db)
-        .find({ _id: { $in: updateIds }, userId }, { projection: { _id: 1 }, session })
-        .toArray();
-      const presentIds = new Set(present.map((d) => d._id));
-      for (const id of updateIds) if (!presentIds.has(id)) saved.delete(id);
+  entries.forEach((entry, i) => {
+    const syncSequence = firstSeq + i;
+    if (entry.fresh) {
+      // Fresh notes may reuse an ID removed by a cloud wipe. The retained
+      // sequence prevents version regression without storing a tombstone.
+      const doc: NoteDoc = { ...entry.fresh, ...entry.fields, syncSequence, localVersion: syncSequence };
+      saved.set(entry.id, doc);
+      ops.push({ insertOne: { document: doc } });
+    } else {
+      const doc: NoteDoc = {
+        ...entry.existing!,
+        ...entry.fields,
+        syncSequence,
+        localVersion: entry.existing!.localVersion + 1,
+      };
+      saved.set(entry.id, doc);
+      updateIds.push(entry.id);
+      ops.push({
+        updateOne: {
+          filter: { _id: entry.id, userId },
+          update: { $set: { ...entry.fields, syncSequence }, $inc: { localVersion: 1 } },
+        },
+      });
     }
-    const notFound = entries.map((e) => e.id).filter((id) => !saved.has(id));
-
-    const results = [...saved.values()].map((doc) => ({
-      id: doc._id, ok: true as const, version: doc.localVersion, updated_at: doc.updatedAt.toISOString(), seq: doc.syncSequence!,
-    }));
-    if (results.length > 0) {
-      const recorded = await syncOperations(db).updateOne(
-        { _id: operationId, status: 'pending' },
-        { $push: { results: { $each: results } } },
-        { session },
-      );
-      if (recorded.matchedCount !== 1) throw Object.assign(new Error('sync_operation_closed'), { status: 409 });
-    }
-    return { saved, notFound };
   });
+
+  await collections.notes(db).bulkWrite(ops, { session, ordered: false });
+
+  // A blind update reports no per-row match count; a follow-up read (inside the same
+  // transaction, so it sees the write just made) finds any target that had vanished.
+  if (updateIds.length > 0) {
+    const present = await collections.notes(db)
+      .find({ _id: { $in: updateIds }, userId }, { projection: { _id: 1 }, session })
+      .toArray();
+    const presentIds = new Set(present.map((d) => d._id));
+    for (const id of updateIds) if (!presentIds.has(id)) saved.delete(id);
+  }
+  const notFound = entries.map((e) => e.id).filter((id) => !saved.has(id));
+
+  const results = [...saved.values()].map((doc) => ({
+    id: doc._id, ok: true as const, version: doc.localVersion, updated_at: doc.updatedAt.toISOString(), seq: doc.syncSequence!,
+  }));
+  if (results.length > 0) {
+    const recorded = await syncOperations(db).updateOne(
+      { _id: operationId, status: 'pending' },
+      { $push: { results: { $each: results } } },
+      { session },
+    );
+    if (recorded.matchedCount !== 1) throw Object.assign(new Error('sync_operation_closed'), { status: 409 });
+  }
+  return { saved, notFound };
 }
