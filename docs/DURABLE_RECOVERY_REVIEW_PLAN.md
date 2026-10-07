@@ -95,10 +95,15 @@ and settle as undelivered. Do not alter a completed failure receipt to success.
 
 **Proposed:** deletion is a metadata/tombstone commit, retaining a valid generation
 for restore. Trashing it before commit would recreate the same cross-store gap.
-The existing 30-day tombstone policy requires an approved retention decision if
-it becomes the only reference to recoverable content; no silent policy extension
-or historical-content promise is made here. Restore must validate the retained
-generation and current version. Missing content remains an explicit error.
+**Verified in current code:** general index initialization no longer creates the
+30-day note/receipt TTLs (`src/db/collections.ts:325` and `:339`). The operator-only
+transition inspects and can remove the exact legacy 30-day definitions
+(`src/db/syncRetention.ts:5`, `:12`, `:35`). **Unverified:** a deployed database may
+still retain those legacy indexes; no live catalog was inspected here. This
+corrects an earlier draft's claim of a uniform current 30-day tombstone policy.
+Generation retention requires a separate approved decision; no new retention or
+historical-content promise is made. Restore validates retained content/current
+version; missing content remains an explicit error.
 
 Wipe must increment the durable user epoch and remove cloud metadata under the
 same gate in a transaction. Pre-wipe intents cannot commit in the new epoch.
