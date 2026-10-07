@@ -14,7 +14,7 @@
     "notifications:welcome": "node --env-file-if-exists=.env --import tsx src/scripts/publishWelcome.ts",
     "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "test": "node --import tsx --test tests/unit.test.ts tests/clientFixture.unit.test.ts",
-    "test:client-fixture": "node --import tsx --test tests/clientFixture.smoke.test.ts tests/clientFixture.failures.test.ts tests/clientFixture.conflicts.test.ts tests/clientFixture.pullIntegrity.test.ts tests/clientFixture.wipe.test.ts",
+    "test:client-fixture": "node --import tsx --test tests/clientFixture.smoke.test.ts tests/clientFixture.failures.test.ts tests/clientFixture.conflicts.test.ts tests/clientFixture.pullIntegrity.test.ts tests/clientFixture.wipe.test.ts tests/clientFixture.batches.test.ts",
     "fixture:client": "node --import tsx tests/clientFixture.ts",
     "test:integration": "node --import tsx --test tests/integration.test.ts",
     "benchmark:admin-pages": "node --import tsx tests/adminPages.benchmark.ts"
