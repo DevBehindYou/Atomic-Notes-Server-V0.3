@@ -3,6 +3,8 @@
 8 October 2026. **Design only; not implemented or activated.** No collection,
 index, route, wallet policy, cleanup job or production data changes in this PR.
 R11/R16 remain partial. The proposed storage changes need separate owner approval.
+The [exact candidate field/index contract](DURABLE_RECOVERY_SCHEMA_PROPOSAL.md)
+defines the bounded implementation scope for that decision; it is not applied.
 
 ## Evidence and current boundary
 
