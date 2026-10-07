@@ -2,7 +2,7 @@
 
 Test-only extension from verified main `bd37028fe6026da1ad4c1f0466fd4826cafa56cb`.
 The guarded loopback assembly adds one synthetic owner and public test session
-with the existing fifty-note tier and a seeded 100-energy budget. Its state
+with the existing thirty-note free tier and a seeded 100-energy budget. Its state
 cannot depend on earlier plaintext, conflict, wipe or refund scenarios. No
 production route, dependency, schema, index, capacity or economy policy changes.
 

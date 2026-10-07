@@ -21,7 +21,7 @@ test('isolated encrypted owner persists only payload through actual HTTP and met
     const db = inspector.db(fixture.database);
     phase = 'isolated_budget';
     const wallet = await db.collection<{ _id: string; energy: number; noteLimit: number }>('atomic_users').findOne({ _id: fixture.encryptedOwner });
-    assert.equal(wallet!.energy, 100); assert.equal(wallet!.noteLimit, 50);
+    assert.equal(wallet!.energy, 100); assert.equal(wallet!.noteLimit, 30);
     assert.equal(await db.collection('notes').countDocuments({ userId: fixture.encryptedOwner }), 0);
     const nonce = randomBytes(12), key = Buffer.from(Array.from({ length: 32 }, (_, i) => i));
     const cipher = createCipheriv('aes-256-gcm', key, nonce);
