@@ -195,6 +195,7 @@ export const noteSchema = z.object({
   syncSequence: z.number().int().optional(),
   // Fingerprint of the content last written to Drive (see lib/contentHash.ts). Absent on notes written before it existed.
   contentHash: z.string().optional(),
+  generationFormat: z.literal(1).optional(),
   syncStatus: z.enum(['synced', 'pending', 'conflict', 'error']).default('synced'),
   createdAt: z.date(),
   updatedAt: z.date(),
