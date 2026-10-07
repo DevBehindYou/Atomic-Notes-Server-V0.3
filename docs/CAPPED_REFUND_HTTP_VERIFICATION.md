@@ -7,7 +7,7 @@ dependencies, costs, grant/refund policy and Controller deployment are unchanged
 The guarded loopback assembly adds the existing admin router with a deliberately
 public synthetic key overridden inside the test process. No production values
 are read. A strict test control accepts one UUID and none/partial/full modes;
-it can affect only the seeded primary owner. During that note's fake Drive
+the intervening grant targets only the seeded primary owner. During that note's fake Drive
 failure, after the sync debit, one real loopback admin energy adjustment fills
 the wallet to cap minus one or the full cap. The transaction and financial
 history come from the existing real admin route, not a direct wallet overwrite.
