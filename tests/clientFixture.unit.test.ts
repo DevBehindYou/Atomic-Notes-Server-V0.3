@@ -1,6 +1,22 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { assertFixtureCleanup, fixtureDatabase } from './clientFixtureSafety.js';
+import { fixtureFailureIds } from './clientFixtureFaults.js';
+
+test('fixture failure controls accept empty reset and one bounded synthetic ID', () => {
+  const id = '00000000-0000-4000-8000-000000000001';
+  assert.equal(fixtureFailureIds({ ids: [] }).size, 0);
+  assert.ok(fixtureFailureIds({ ids: [id] }).has(id));
+});
+for (const [name, body] of [
+  ['invalid ID', { ids: ['invalid'] }],
+  ['duplicate IDs', { ids: Array(2).fill('00000000-0000-4000-8000-000000000001') }],
+  ['oversized control', { ids: Array(51).fill('00000000-0000-4000-8000-000000000001') }],
+] as const) {
+  test(`fixture failure controls refuse ${name}`, () => {
+    assert.throws(() => fixtureFailureIds(body), /fixture_invalid_failure_ids/);
+  });
+}
 
 const local = 'mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true';
 for (const [name, uri] of [

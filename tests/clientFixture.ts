@@ -7,6 +7,7 @@ import { serve } from '@hono/node-server';
 import type { Db } from 'mongodb';
 import type { DriveAdapter } from '../src/routes/notes.js';
 import { assertFixtureCleanup, fixtureDatabase } from './clientFixtureSafety.js';
+import { fixtureFailureIds } from './clientFixtureFaults.js';
 
 // Public, synthetic credentials valid only in this generated test database.
 export const FIXTURE_TOKENS = {
@@ -74,13 +75,24 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
     }
     const files = new Map<string, Record<string, unknown>>();
     let writes = 0, reads = 0;
+    let writeAttempts = 0, writeFailures = 0;
+    let failedIds = new Set<string>();
+    const checkWrite = (content: object) => {
+      writeAttempts++;
+      if ('id' in content && typeof content.id === 'string' && failedIds.has(content.id)) {
+        writeFailures++;
+        throw new Error('fixture_drive_write_failed');
+      }
+    };
     const notFound = () => Object.assign(new Error('fixture_file_missing'), { code: 404 });
     const drive: DriveAdapter = {
       async createNoteFile(_a, _r, _folder, _name, content) {
+        checkWrite(content);
         const id = randomUUID(); files.set(id, structuredClone(content) as Record<string, unknown>); writes++;
         return { id, headRevisionId: 'fixture-revision' };
       },
       async updateNoteFile(_a, _r, id, content) {
+        checkWrite(content);
         if (!files.has(id)) throw notFound();
         files.set(id, structuredClone(content) as Record<string, unknown>); writes++;
         return { id, headRevisionId: 'fixture-revision' };
@@ -101,6 +113,13 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
     app.route('/api/notes', createNotesRoute(drive));
     // Read-only fixture diagnostics. No such endpoints exist in production.
     app.get('/__fixture/ready', (c) => c.json({ owner, other, database }));
+    // Fault controls exist only in this guarded loopback test assembly.
+    app.post('/__fixture/fail-writes', async (c) => {
+      if (c.req.header('authorization') !== `Bearer ${FIXTURE_TOKENS.a}`) return c.json({ error: 'fixture_control_denied' }, 401);
+      try { failedIds = fixtureFailureIds(await c.req.json()); }
+      catch { return c.json({ error: 'fixture_invalid_failure_ids' }, 400); }
+      return c.json({ armed: failedIds.size });
+    });
     app.get('/__fixture/state', async (c) => {
       const users = await Promise.all([owner, other].map(async (userId) => ({
         userId,
@@ -108,7 +127,7 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
         notes: await collections.notes(db!).countDocuments({ userId, deleted: false }),
         ledger: await collections.energyLedger(db!).find({ userId }, { projection: { _id: 0, kind: 1, energyDelta: 1 } }).toArray(),
       })));
-      return c.json({ writes, reads, liveFiles: files.size, users });
+      return c.json({ writes, reads, writeAttempts, writeFailures, liveFiles: files.size, users });
     });
     server = serve({ fetch: app.fetch, hostname: '127.0.0.1', port: 0 });
     if (!server.listening) await once(server, 'listening');
