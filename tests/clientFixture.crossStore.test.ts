@@ -56,10 +56,13 @@ test('successful Drive overwrite followed by rejected metadata commit remains mi
       assert.equal(error.rows, undefined); assert.equal(error.nextCursor, undefined);
     };
     phase = 'unsafe_pull_refused'; await refusedPull();
+    // The real refused pull reads Drive, so capture its diagnostic counters
+    // before checking that the following replay itself changes nothing.
+    const beforeReplay = await state();
     phase = 'failed_replay';
     const replay = await call('/api/notes/push', request);
     assert.equal(replay.status, 502); assert.deepEqual(await replay.json(), receipt);
-    assert.deepEqual(await state(), failed);
+    assert.deepEqual(await state(), beforeReplay);
     phase = 'validator_removed';
     await db.command({ collMod: 'notes', validator: {}, validationLevel: 'strict', validationAction: 'error' });
     await refusedPull();

@@ -30,3 +30,9 @@ Drive and real Mongo; it does not prove real Drive outages, abrupt process death
 lease races, permanent loss across every client, or a recovery implementation.
 R11/R16 remain partial. Immutable generations and a metadata-only journal are
 proposed separately and still need concrete schema/identity/retention review.
+
+The first CI revision failed in the `failed_replay` group. The state snapshot
+preceded a real refused pull, which increments the fake Drive read counter.
+The corrected assertion captures that counter after the pull and before replay.
+This diagnosis is inferred from source until corrected exact-head CI passes;
+the failed fixed-code artifact and run metadata are retained.
