@@ -15,8 +15,9 @@ export async function generateNoteFileIdsWith(drive: drive_v3.Drive, count: numb
 
 function checkedContent(content: unknown): AtomicFileV1 {
   const note = migrateAtomicFile(content);
-  // Reuse current wire bounds and mixed-plaintext/ciphertext refusal.
-  remoteNoteRowSchema.parse({ ...note, created_at: note.createdAt, updated_at: note.updatedAt,
+  // Deletion belongs to Mongo metadata, not AtomicFile content. Validate a live
+  // content projection using current wire bounds and plaintext/cipher refusal.
+  remoteNoteRowSchema.parse({ ...note, deleted: false, created_at: note.createdAt, updated_at: note.updatedAt,
     enc_v: note.encV, base_version: 0 });
   return note;
 }

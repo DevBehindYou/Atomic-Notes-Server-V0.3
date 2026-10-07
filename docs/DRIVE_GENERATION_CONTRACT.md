@@ -31,3 +31,10 @@ Initial creation uses one create plus metadata/media readback, with extra API
 latency/quota/storage requiring measurement. A reviewed metadata-only journal,
 retention/old-writer decisions and separate schema approval remain prerequisites.
 R11/R16 stay partial; this preparation receives no closure credit.
+
+**Local verification:** type checking and all 72 pure tests pass after correcting
+the validation projection to include `deleted: false`. AtomicFile content has
+no deletion field; deletion remains Mongo metadata-owned. The initial published
+revision incorrectly omitted the required field and failed five new local tests;
+its CI run 37667116921 also failed. That failed revision is retained as evidence,
+not accepted for merge. No wire or storage schema was changed to correct it.
