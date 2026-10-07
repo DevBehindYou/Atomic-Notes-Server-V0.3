@@ -138,3 +138,11 @@ jobs:
           path: ci-recovery-settlement-proof.json
           if-no-files-found: ignore
           retention-days: 7
+      - name: Upload sanitized recovery admission proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitized-recovery-admission-proof
+          path: ci-recovery-admission-proof.json
+          if-no-files-found: ignore
+          retention-days: 7

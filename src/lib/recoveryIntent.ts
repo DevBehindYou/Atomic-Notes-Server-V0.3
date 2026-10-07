@@ -40,30 +40,34 @@ function manifest(row: NoteWriteIntent) {
  * couple debit + intent preparation yet; it is not an activated sync path.
  */
 export async function prepareRecoveryIntents(db: Db, lease: RecoveryLease, input: unknown): Promise<NoteWriteIntent[]> {
+  return withRecoveryFence(db, lease, (session) => prepareRecoveryIntentsInSession(db, lease, input, session));
+}
+
+/** Same preparation checks in the admission caller's fenced transaction. */
+export async function prepareRecoveryIntentsInSession(db: Db, lease: RecoveryLease, input: unknown,
+  session: ClientSession): Promise<NoteWriteIntent[]> {
   const rows = parseRecoveryIntents(input);
   if (rows.some((row) => row.userId !== lease.userId || row.wipeEpoch !== lease.wipeEpoch ||
       row.leaseToken !== lease.token || row.state !== 'prepared')) throw new Error('recovery_prepare_identity_invalid');
-  return withRecoveryFence(db, lease, async (session) => {
-    const operation = await pendingOperation(db, rows[0], session);
-    if (JSON.stringify(operation.rowIds) !== JSON.stringify(rows.map((row) => row.noteId))) throw new Error('recovery_operation_rows_mismatch');
-    const result: NoteWriteIntent[] = [];
-    for (const row of rows) {
-      if (operation.results.some((stored) => stored.id === row.noteId)) throw new Error('recovery_row_already_settled');
-      await preimage(db, row, session);
-      const raw = await intents(db).findOne({ _id: row._id }, { session });
-      if (!raw) { await intents(db).insertOne(row, { session }); result.push(row); continue; }
-      const current = noteWriteIntentSchema.parse(raw);
-      if (!['prepared', 'verified'].includes(current.state) || manifest(current) !== manifest(row)) {
-        throw new Error('recovery_intent_mismatch');
-      }
-      // A new lease may adopt only the identical persisted generation manifest.
-      const adopted = noteWriteIntentSchema.parse({ ...current, leaseToken: lease.token, updatedAt: row.updatedAt });
-      const changed = await intents(db).replaceOne({ _id: row._id, state: current.state, leaseToken: current.leaseToken }, adopted, { session });
-      if (changed.matchedCount !== 1) throw new Error('recovery_intent_changed');
-      result.push(adopted);
+  const operation = await pendingOperation(db, rows[0], session);
+  if (JSON.stringify(operation.rowIds) !== JSON.stringify(rows.map((row) => row.noteId))) throw new Error('recovery_operation_rows_mismatch');
+  const result: NoteWriteIntent[] = [];
+  for (const row of rows) {
+    if (operation.results.some((stored) => stored.id === row.noteId)) throw new Error('recovery_row_already_settled');
+    await preimage(db, row, session);
+    const raw = await intents(db).findOne({ _id: row._id }, { session });
+    if (!raw) { await intents(db).insertOne(row, { session }); result.push(row); continue; }
+    const current = noteWriteIntentSchema.parse(raw);
+    if (!['prepared', 'verified'].includes(current.state) || manifest(current) !== manifest(row)) {
+      throw new Error('recovery_intent_mismatch');
     }
-    return result;
-  });
+    // A new lease may adopt only the identical persisted generation manifest.
+    const adopted = noteWriteIntentSchema.parse({ ...current, leaseToken: lease.token, updatedAt: row.updatedAt });
+    const changed = await intents(db).replaceOne({ _id: row._id, state: current.state, leaseToken: current.leaseToken }, adopted, { session });
+    if (changed.matchedCount !== 1) throw new Error('recovery_intent_changed');
+    result.push(adopted);
+  }
+  return result;
 }
 
 /** Persisted ID is mandatory before any external create. An obsolete lease can
