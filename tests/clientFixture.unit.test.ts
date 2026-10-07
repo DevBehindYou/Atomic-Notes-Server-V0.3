@@ -1,7 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { assertFixtureCleanup, fixtureDatabase } from './clientFixtureSafety.js';
-import { fixtureFailureIds, fixtureReadFault } from './clientFixtureFaults.js';
+import { fixtureFailureIds, fixtureReadFault, fixtureRefundFault } from './clientFixtureFaults.js';
+
+test('refund fault controls accept one bounded note and each explicit mode', () => {
+  const noteId = '00000000-0000-4000-8000-000000000001';
+  for (const mode of ['none', 'partial', 'full']) assert.deepEqual(fixtureRefundFault({ noteId, mode }), { noteId, mode });
+});
+for (const [name, body] of [
+  ['invalid ID', { noteId: 'invalid', mode: 'partial' }],
+  ['invalid mode', { noteId: '00000000-0000-4000-8000-000000000001', mode: 'grant' }],
+  ['extra field', { noteId: '00000000-0000-4000-8000-000000000001', mode: 'partial', energy: 100 }],
+] as const) {
+  test(`refund fault controls refuse ${name}`, () => assert.throws(() => fixtureRefundFault(body), /fixture_invalid_refund_fault/));
+}
 
 test('read fault controls accept one bounded ID and each explicit mode', () => {
   const noteId = '00000000-0000-4000-8000-000000000001';

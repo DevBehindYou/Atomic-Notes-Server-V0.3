@@ -7,7 +7,7 @@ import { serve } from '@hono/node-server';
 import type { Db } from 'mongodb';
 import type { DriveAdapter } from '../src/routes/notes.js';
 import { assertFixtureCleanup, fixtureDatabase } from './clientFixtureSafety.js';
-import { fixtureFailureIds, fixtureReadFault } from './clientFixtureFaults.js';
+import { fixtureFailureIds, fixtureReadFault, fixtureRefundFault } from './clientFixtureFaults.js';
 
 // Public, synthetic credentials valid only in this generated test database.
 export const FIXTURE_TOKENS = {
@@ -15,6 +15,8 @@ export const FIXTURE_TOKENS = {
   batch: 'atomic-disposable-batch',
 } as const;
 let started = false;
+// Deliberately public, usable only in this guarded generated test process.
+export const FIXTURE_ADMIN_KEY = 'atomic-disposable-admin-key';
 
 export async function startClientFixture(uri: string | undefined, selectedDatabase?: string) {
   const database = fixtureDatabase(uri, selectedDatabase);
@@ -24,6 +26,7 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
   process.env.MONGODB_DB_NAME = database;
   // Never load .env; override test-process encryption policy with dummy material.
   process.env.TOKEN_ENCRYPTION_KEY = Buffer.alloc(32, 3).toString('base64');
+  process.env.ADMIN_API_KEY = FIXTURE_ADMIN_KEY;
   delete process.env.COIN_EXPIRY_ACTIVATED_AT;
   const { getDb, closeDb } = await import('../src/db/mongo.js');
   let db: Db | undefined;
@@ -57,6 +60,7 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
     const { energyEnsure } = await import('../src/lib/energy.js');
     const { createNotesRoute } = await import('../src/routes/notes.js');
     const { default: authRoute } = await import('../src/routes/auth.js');
+    const { default: adminRoute } = await import('../src/routes/admin.js');
     const { registerErrorHandler } = await import('../src/middleware/errorHandler.js');
     await ensureIndexes(db);
     const owner = randomUUID(), other = randomUUID(), batchOwner = randomUUID();
@@ -83,9 +87,31 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
     let writeAttempts = 0, writeFailures = 0;
     let failedIds = new Set<string>();
     let readFault: ReturnType<typeof fixtureReadFault> | undefined;
-    const checkWrite = (content: object) => {
+    let refundFault: (ReturnType<typeof fixtureRefundFault> & { grantPending: boolean }) | undefined;
+    const checkWrite = async (content: object) => {
       writeAttempts++;
-      if ('id' in content && typeof content.id === 'string' && failedIds.has(content.id)) {
+      const capped = refundFault && refundFault.mode !== 'none' && 'id' in content && content.id === refundFault.noteId;
+      if (capped && refundFault!.grantPending) {
+        refundFault!.grantPending = false;
+        // Interleave the existing real admin HTTP adjustment after sync debit
+        // but before its failed Drive result/refund. No direct wallet rewrite.
+        const wallet = await collections.atomicUsers(db!).findOne({ _id: owner });
+        if (!wallet) throw new Error('fixture_wallet_missing');
+        const target = wallet.energyCap - (refundFault!.mode === 'partial' ? 1 : 0);
+        const delta = target - wallet.energy;
+        if (delta > 0) {
+          const address = server?.address();
+          if (!address || typeof address === 'string' || address.address !== '127.0.0.1') throw new Error('fixture_requires_loopback');
+          const response = await fetch(`http://127.0.0.1:${address.port}/api/admin/energy`, {
+            method: 'POST', headers: { 'content-type': 'application/json', 'x-admin-api-key': FIXTURE_ADMIN_KEY },
+            body: JSON.stringify({ user_id: owner, request_id: randomUUID(), energy_delta: delta,
+              coins_delta: 0, note: 'Synthetic intervening energy grant' }),
+          });
+          if (response.status !== 200) throw new Error('fixture_intervening_grant_failed');
+          await response.arrayBuffer();
+        }
+      }
+      if (capped || ('id' in content && typeof content.id === 'string' && failedIds.has(content.id))) {
         writeFailures++;
         throw new Error('fixture_drive_write_failed');
       }
@@ -93,12 +119,12 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
     const notFound = () => Object.assign(new Error('fixture_file_missing'), { code: 404 });
     const drive: DriveAdapter = {
       async createNoteFile(_a, _r, _folder, _name, content) {
-        checkWrite(content);
+        await checkWrite(content);
         const id = randomUUID(); files.set(id, structuredClone(content) as Record<string, unknown>); writes++;
         return { id, headRevisionId: 'fixture-revision' };
       },
       async updateNoteFile(_a, _r, id, content) {
-        checkWrite(content);
+        await checkWrite(content);
         if (!files.has(id)) throw notFound();
         files.set(id, structuredClone(content) as Record<string, unknown>); writes++;
         return { id, headRevisionId: 'fixture-revision' };
@@ -127,6 +153,7 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
     // The real logout route performs only session revocation/logging. Google
     // sign-in routes are not invoked by this synthetic-session harness.
     app.route('/api/auth', authRoute);
+    app.route('/api/admin', adminRoute);
     // Read-only fixture diagnostics. No such endpoints exist in production.
     app.get('/__fixture/ready', (c) => c.json({ owner, other, batchOwner, database }));
     // Fault controls exist only in this guarded loopback test assembly.
@@ -143,6 +170,14 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
       try { readFault = fixtureReadFault(await c.req.json()); }
       catch { return c.json({ error: 'fixture_invalid_read_fault' }, 400); }
       return c.json({ armed: readFault.mode !== 'none' });
+    });
+    // One bounded note, one grant through the real admin route, then fail its
+    // fake Drive write. Only the seeded primary owner can receive that grant.
+    app.post('/__fixture/refund-fault', async (c) => {
+      if (c.req.header('authorization') !== `Bearer ${FIXTURE_TOKENS.a}`) return c.json({ error: 'fixture_control_denied' }, 401);
+      try { refundFault = { ...fixtureRefundFault(await c.req.json()), grantPending: true }; }
+      catch { return c.json({ error: 'fixture_invalid_refund_fault' }, 400); }
+      return c.json({ armed: refundFault.mode !== 'none' });
     });
     app.get('/__fixture/state', async (c) => {
       const users = await Promise.all([owner, other, batchOwner].map(async (userId) => ({

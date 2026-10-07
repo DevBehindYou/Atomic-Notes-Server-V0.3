@@ -14,3 +14,11 @@ export function fixtureReadFault(body: unknown) {
   if (!parsed.success) throw new Error('fixture_invalid_read_fault');
   return parsed.data;
 }
+
+const refundFaultSchema = z.object({ noteId: z.string().uuid(),
+  mode: z.enum(['none', 'partial', 'full']) }).strict();
+export function fixtureRefundFault(body: unknown) {
+  const parsed = refundFaultSchema.safeParse(body);
+  if (!parsed.success) throw new Error('fixture_invalid_refund_fault');
+  return parsed.data;
+}
