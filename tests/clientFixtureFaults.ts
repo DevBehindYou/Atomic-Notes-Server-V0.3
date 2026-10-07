@@ -6,3 +6,11 @@ export function fixtureFailureIds(body: unknown): Set<string> {
   if (!parsed.success) throw new Error('fixture_invalid_failure_ids');
   return new Set(parsed.data.ids);
 }
+
+const readFaultSchema = z.object({ noteId: z.string().uuid(),
+  mode: z.enum(['none', 'missing', 'corrupt', 'mismatch']) }).strict();
+export function fixtureReadFault(body: unknown) {
+  const parsed = readFaultSchema.safeParse(body);
+  if (!parsed.success) throw new Error('fixture_invalid_read_fault');
+  return parsed.data;
+}

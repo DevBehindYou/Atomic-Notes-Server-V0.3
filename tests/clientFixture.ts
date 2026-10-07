@@ -7,7 +7,7 @@ import { serve } from '@hono/node-server';
 import type { Db } from 'mongodb';
 import type { DriveAdapter } from '../src/routes/notes.js';
 import { assertFixtureCleanup, fixtureDatabase } from './clientFixtureSafety.js';
-import { fixtureFailureIds } from './clientFixtureFaults.js';
+import { fixtureFailureIds, fixtureReadFault } from './clientFixtureFaults.js';
 
 // Public, synthetic credentials valid only in this generated test database.
 export const FIXTURE_TOKENS = {
@@ -77,6 +77,7 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
     let writes = 0, reads = 0;
     let writeAttempts = 0, writeFailures = 0;
     let failedIds = new Set<string>();
+    let readFault: ReturnType<typeof fixtureReadFault> | undefined;
     const checkWrite = (content: object) => {
       writeAttempts++;
       if ('id' in content && typeof content.id === 'string' && failedIds.has(content.id)) {
@@ -104,7 +105,14 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
       async getNoteFileContent(_a, _r, id) {
         const content = files.get(id);
         if (!content) throw notFound();
-        reads++; return structuredClone(content);
+        reads++;
+        const fault = readFault;
+        if (fault && fault.noteId === content.id) {
+          if (fault.mode === 'missing') throw notFound();
+          if (fault.mode === 'corrupt') return { fixture_invalid_file: true };
+          if (fault.mode === 'mismatch') return { ...structuredClone(content), body: 'Synthetic inconsistent body' };
+        }
+        return structuredClone(content);
       },
       async ensureAppFolders() { return { notesId: 'fixture-folder' }; },
     };
@@ -119,6 +127,14 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
       try { failedIds = fixtureFailureIds(await c.req.json()); }
       catch { return c.json({ error: 'fixture_invalid_failure_ids' }, 400); }
       return c.json({ armed: failedIds.size });
+    });
+    // One simulated read fault at a time. Restore disables the response fault;
+    // it never deletes or rewrites the underlying fake file or metadata.
+    app.post('/__fixture/read-fault', async (c) => {
+      if (c.req.header('authorization') !== `Bearer ${FIXTURE_TOKENS.a}`) return c.json({ error: 'fixture_control_denied' }, 401);
+      try { readFault = fixtureReadFault(await c.req.json()); }
+      catch { return c.json({ error: 'fixture_invalid_read_fault' }, 400); }
+      return c.json({ armed: readFault.mode !== 'none' });
     });
     app.get('/__fixture/state', async (c) => {
       const users = await Promise.all([owner, other].map(async (userId) => ({

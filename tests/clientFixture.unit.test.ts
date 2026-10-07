@@ -1,7 +1,23 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { assertFixtureCleanup, fixtureDatabase } from './clientFixtureSafety.js';
-import { fixtureFailureIds } from './clientFixtureFaults.js';
+import { fixtureFailureIds, fixtureReadFault } from './clientFixtureFaults.js';
+
+test('read fault controls accept one bounded ID and each explicit mode', () => {
+  const noteId = '00000000-0000-4000-8000-000000000001';
+  for (const mode of ['none', 'missing', 'corrupt', 'mismatch']) {
+    assert.deepEqual(fixtureReadFault({ noteId, mode }), { noteId, mode });
+  }
+});
+for (const [name, body] of [
+  ['invalid ID', { noteId: 'invalid', mode: 'missing' }],
+  ['invalid mode', { noteId: '00000000-0000-4000-8000-000000000001', mode: 'delete' }],
+  ['extra field', { noteId: '00000000-0000-4000-8000-000000000001', mode: 'none', body: 'extra' }],
+] as const) {
+  test(`read fault controls refuse ${name}`, () => {
+    assert.throws(() => fixtureReadFault(body), /fixture_invalid_read_fault/);
+  });
+}
 
 test('fixture failure controls accept empty reset and one bounded synthetic ID', () => {
   const id = '00000000-0000-4000-8000-000000000001';
