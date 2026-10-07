@@ -67,8 +67,17 @@ jobs:
           MONGODB_URI: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
         run: npm run test:client-fixture
       - name: MongoDB failure diagnostics
+        # Only the explicitly selected fixed-code artifact is retrieved by review.
         if: failure()
         run: docker logs atomic-test-mongo || true
+      - name: Upload sanitized capped refund proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitized-capped-refund-proof
+          path: ci-capped-refund-proof.json
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Remove disposable MongoDB
         if: always()
         run: docker rm -f atomic-test-mongo || true
