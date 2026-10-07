@@ -28,3 +28,12 @@ production endpoint. Original two-key/HMAC Controller behavior is outside scope.
 Local type checking and 63 pure controls must pass. Actual database execution is
 CI-only in the generated namespace. The matching App receipt/cache proof is a
 separate follow-up. R25 remains partial; exact-head and destination-main gates apply.
+
+The first two CI revisions failed this new scenario. The deliberately sanitized
+second-run artifact identifies `ledger_deltas` in partial mode; earlier checks
+(including the capped receipt and final wallet) passed. The diagnostic query has
+no ordering contract, so the test now compares ledger multisets, preserving
+duplicate counts instead of assuming insertion order or slicing at an old length.
+That diagnosis is an inference until the corrected exact-head CI passes. No
+production ordering, billing, or refund behavior is changed. A dedicated artifact
+contains fixed phase/mode/outcome codes only, never raw assertions or identifiers.

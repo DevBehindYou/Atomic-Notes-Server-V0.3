@@ -61,8 +61,16 @@ test('intervening real admin grants cap failed-sync refunds and replay keeps the
       assert.equal(wallet(after).notes, 0);
       phase = 'wallet_cap'; assert.equal(wallet(after).energy, 120);
       const grant = (mode === 'partial' ? 119 : 120) - (wallet(before).energy - 5);
-      const additions = wallet(after).ledger.slice(wallet(before).ledger.length);
-      phase = 'ledger_deltas'; assert.deepEqual(additions.map((r) => r.energyDelta), mode === 'partial' ? [-5, grant, 1] : [-5, grant]);
+      // The diagnostic query has no sort; MongoDB may use its descending date
+      // index. Compare the multiset difference, never append positions.
+      phase = 'ledger_deltas';
+      const additions = [...wallet(after).ledger];
+      for (const previous of wallet(before).ledger) {
+        const index = additions.findIndex((entry) => entry.kind === previous.kind && entry.energyDelta === previous.energyDelta);
+        assert.ok(index >= 0); additions.splice(index, 1);
+      }
+      const expected = mode === 'partial' ? [-5, grant, 1] : [-5, grant];
+      assert.deepEqual(additions.map((r) => r.energyDelta).sort((a, b) => a - b), expected.sort((a, b) => a - b));
       assert.ok(additions.every((r) => ['spend', 'admin_adjust'].includes(r.kind)));
       const storedWallet = await db.collection<{ _id: string; lastStandardSyncAt: Date | null }>('atomic_users').findOne({ _id: fixture.owner });
       phase = 'window_restored'; assert.equal(storedWallet!.lastStandardSyncAt, null);
