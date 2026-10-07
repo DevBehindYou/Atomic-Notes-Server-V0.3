@@ -23,3 +23,10 @@ cases. Server routes permit up to 100 rows; this fixture does not assert a
 app.ts middleware/global body-limit behavior is not assembled here. Local type
 checking and 59 pure controls must pass; actual database execution is CI-only.
 Exact-head and destination-main gates apply. R25 remains partial.
+
+The first PR revision's CI failed in the client-fixture stage. Source inspection
+found the replay equality assertion comparing a full response to a Zod projection
+that strips undeclared receipt fields. The assertion now compares both complete
+wire receipts while keeping typed checks separately. Raw logs were not retrieved;
+the exact failing assertion is inferred until subsequent verification, not
+established by the step metadata alone. Preserve the failed revision/run record.

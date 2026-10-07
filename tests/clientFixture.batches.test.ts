@@ -25,7 +25,8 @@ test('isolated capacity-tier fixture charges each batch, refuses standard cooldo
   const request = { requestId: randomUUID(), mode: 'standard', rows: rows.slice(0, 50) };
   const first = await call('/api/notes/push', request);
   assert.equal(first.status, 200);
-  const receipt = receiptSchema.parse(await first.json());
+  const originalReceipt = await first.json();
+  const receipt = receiptSchema.parse(originalReceipt);
   assert.equal(receipt.results.length, 50); assert.ok(receipt.results.every((r) => r.ok));
   assert.equal(receipt.charged, 5); assert.equal(receipt.refunded, 0);
   const afterFirst = await state();
@@ -67,7 +68,9 @@ test('isolated capacity-tier fixture charges each batch, refuses standard cooldo
     assert.equal(pages, 6); assert.equal(cursor, 51);
     assert.deepEqual(new Set(seen), new Set(rows.map((r) => r.id))); assert.equal(seen.length, 51);
     assert.deepEqual(await state(), afterBoth);
-    assert.deepEqual(await (await call('/api/notes/push', request)).json(), receipt);
+    // Compare complete wire receipts. The schema is intentionally a typed
+    // projection for assertions above, and strips fields it does not declare.
+    assert.deepEqual(await (await call('/api/notes/push', request)).json(), originalReceipt);
     assert.deepEqual(await state(), afterBoth);
   } finally { await inspector.close(); }
 });
