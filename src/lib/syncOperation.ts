@@ -1,6 +1,6 @@
 import { appendLedger } from './ledger.js';
 import { createHash, randomUUID } from 'node:crypto';
-import type { Db } from 'mongodb';
+import type { Db, ClientSession } from 'mongodb';
 import { collections } from '../db/collections.js';
 import { withTransaction } from '../db/mongo.js';
 import { ENERGY, EnergyError, dailyGrantDue, energyGrantDaily, energyWallet } from './energy.js';
@@ -138,28 +138,33 @@ export async function finishSync(db: Db, operation: SyncOperation) {
 
 /** The refund path, and the fallback when the operation changed under the fast path. */
 async function finishSyncAtomically(db: Db, operation: SyncOperation) {
-  return withTransaction(async (session) => {
-    const current = (await syncOperations(db).findOne({ _id: operation._id }, { session }))!;
-    if (current.status === 'complete') return current;
-    const results = settledResults(current);
-    let refunded = 0;
-    if (current.charged > 0 && results.every((r) => !r.ok)) {
-      const wallet = (await collections.atomicUsers(db).findOne({ _id: current.userId }, { session }))!;
-      refunded = Math.max(0, Math.min(current.charged, wallet.energyCap - wallet.energy));
-      const restoreWindow = current.mode === 'standard' && wallet.lastStandardSyncAt?.getTime() === current.createdAt.getTime();
-      if (refunded > 0 || restoreWindow) {
-        await collections.atomicUsers(db).updateOne({ _id: current.userId }, {
-          ...(refunded > 0 ? { $inc: { energy: refunded } } : {}),
-          ...(restoreWindow ? { $set: { lastStandardSyncAt: current.previousStandardAt } } : {}),
-        }, { session });
-      }
-      if (refunded > 0) {
-        await appendLedger(db, session, { _id: randomUUID(), userId: current.userId, kind: 'admin_adjust',
-          coinsDelta: 0, energyDelta: refunded, resultingCoins: wallet.coins, resultingEnergy: wallet.energy + refunded,
-          note: 'Refund: sync failed before any note succeeded', createdAt: new Date() }, wallet);
-      }
+  return withTransaction((session) => finishSyncInSession(db, operation, session));
+}
+
+/** Existing atomic settlement inside a caller-owned session. Caller owns the
+ * transaction/fence; charge, capped refund, ledger and cooldown policy unchanged.
+ */
+export async function finishSyncInSession(db: Db, operation: SyncOperation, session: ClientSession) {
+  const current = (await syncOperations(db).findOne({ _id: operation._id }, { session }))!;
+  if (current.status === 'complete') return current;
+  const results = settledResults(current);
+  let refunded = 0;
+  if (current.charged > 0 && results.every((r) => !r.ok)) {
+    const wallet = (await collections.atomicUsers(db).findOne({ _id: current.userId }, { session }))!;
+    refunded = Math.max(0, Math.min(current.charged, wallet.energyCap - wallet.energy));
+    const restoreWindow = current.mode === 'standard' && wallet.lastStandardSyncAt?.getTime() === current.createdAt.getTime();
+    if (refunded > 0 || restoreWindow) {
+      await collections.atomicUsers(db).updateOne({ _id: current.userId }, {
+        ...(refunded > 0 ? { $inc: { energy: refunded } } : {}),
+        ...(restoreWindow ? { $set: { lastStandardSyncAt: current.previousStandardAt } } : {}),
+      }, { session });
     }
-    await syncOperations(db).updateOne({ _id: current._id }, { $set: { results, refunded, status: 'complete' } }, { session });
-    return { ...current, results, refunded, status: 'complete' as const };
-  });
+    if (refunded > 0) {
+      await appendLedger(db, session, { _id: randomUUID(), userId: current.userId, kind: 'admin_adjust',
+        coinsDelta: 0, energyDelta: refunded, resultingCoins: wallet.coins, resultingEnergy: wallet.energy + refunded,
+        note: 'Refund: sync failed before any note succeeded', createdAt: new Date() }, wallet);
+    }
+  }
+  await syncOperations(db).updateOne({ _id: current._id }, { $set: { results, refunded, status: 'complete' } }, { session });
+  return { ...current, results, refunded, status: 'complete' as const };
 }
