@@ -1,5 +1,7 @@
 import { appendLedger } from './ledger.js';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
+import { fingerprintOf } from './syncFingerprint.js';
+export { fingerprintOf } from './syncFingerprint.js';
 import type { Db, ClientSession } from 'mongodb';
 import { collections, type AtomicUserDoc } from '../db/collections.js';
 import { withTransaction } from '../db/mongo.js';
@@ -17,7 +19,6 @@ export const syncOperations = (db: Db) => db.collection<SyncOperation>('sync_ope
 
 const operationId = (userId: string, requestId: string) => `${userId}:${requestId}`;
 const mismatch = () => Object.assign(new Error('sync_request_mismatch'), { status: 409 });
-export const fingerprintOf = (rows: unknown[], mode: string) => createHash('sha256').update(JSON.stringify({ rows, mode })).digest('hex');
 
 /** Refuse tagged pending work, including an unsupported future format. The
  * legacy path cannot reconcile its generations or close its journal safely.
