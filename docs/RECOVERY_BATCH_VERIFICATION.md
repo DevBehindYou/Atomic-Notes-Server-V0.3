@@ -36,6 +36,14 @@ the initial ledger and explicitly grants only a synthetic 100-note fixture tier.
 This explanation is inferred from source and phase evidence; no raw failure
 logs were retrieved. The failed artifact is preserved separately from retries.
 
+The second head `26033cc` passed admission and failed run 37794354319 in the
+`metadata_rejection` group. The Mongo driver's unordered bulk implementation can
+retain validation code 121 in `MongoBulkWriteError.result` while surfacing a
+later transaction-abort code. The fixture now accepts only an explicit 121
+from the direct error or that bulk result, and separates error classification
+from rollback snapshots in fixed phases. This is a source-based explanation,
+pending the corrected run; no generic rejection substitutes for validation.
+
 Only allowlisted fixed phase/outcome values are uploaded in
 `ci-recovery-batch-proof.json`. Its passing outcome is asserted only after
 retrieval from a successful exact-head CI run.

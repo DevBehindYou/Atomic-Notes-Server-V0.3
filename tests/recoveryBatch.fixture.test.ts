@@ -3,6 +3,7 @@ import test from 'node:test';
 import { randomUUID } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import type { drive_v3 } from 'googleapis';
+import { MongoBulkWriteError } from 'mongodb';
 import type { DriveAdapter } from '../src/routes/notes.js';
 import { noteWriteIntentSchema, type NoteWriteIntent } from '../src/db/recoveryContract.js';
 import { noteContentHash } from '../src/lib/contentHash.js';
@@ -120,7 +121,15 @@ test('inactive fifty-row mixed batch rolls back atomically, commits ordered sequ
   phase = 'metadata_rejection';
   await db.command({ collMod: 'notes', validator: { _id: { $ne: targets[49].id } }, validationLevel: 'strict', validationAction: 'error' });
   await assert.rejects(commitRecoveryIntents(db, lease, request.intents.map((row) => row._id), sdk, 'synthetic-parent'),
-    (error: unknown) => typeof error === 'object' && error !== null && 'code' in error && error.code === 121);
+    (error: unknown) => {
+      // Unordered insert/update batches can surface the later transaction abort
+      // while retaining the original validation rejection in the bulk result.
+      const validation = (typeof error === 'object' && error !== null && 'code' in error && error.code === 121) ||
+        (error instanceof MongoBulkWriteError && error.result.getWriteErrors().some((entry) => entry.code === 121));
+      phase = validation ? 'metadata_validation_error' : 'metadata_error_unclassified';
+      return validation;
+    });
+  phase = 'rollback_snapshot';
   assert.deepEqual(await snapshot(), before); assert.deepEqual([...files], beforeFiles);
   await db.command({ collMod: 'notes', validator: {}, validationLevel: 'strict', validationAction: 'error' });
   phase = 'post_write_rollback';
