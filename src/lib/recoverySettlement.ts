@@ -10,6 +10,20 @@ const journal = (db: Db) => db.collection<NoteWriteIntent>('note_write_intents')
 
 export async function finishRecoverySync(db: Db, lease: RecoveryLease, input: unknown,
   afterWrites?: (session: ClientSession) => Promise<void>): Promise<SyncOperation> {
+  return settleRecoverySync(db, lease, input, false, afterWrites);
+}
+
+/** Explicitly abandon unfinished work under the current same-epoch fence.
+ * Caller chooses to stop recovery; this does not classify errors or delete files.
+ * Stored committed successes and the existing refund policy remain authoritative.
+ */
+export async function abandonRecoverySync(db: Db, lease: RecoveryLease, input: unknown,
+  afterWrites?: (session: ClientSession) => Promise<void>): Promise<SyncOperation> {
+  return settleRecoverySync(db, lease, input, true, afterWrites);
+}
+
+async function settleRecoverySync(db: Db, lease: RecoveryLease, input: unknown, abandonUnfinished: boolean,
+  afterWrites?: (session: ClientSession) => Promise<void>): Promise<SyncOperation> {
   const operationId = z.string().length(73).parse(input);
   return withRecoveryFence(db, lease, async (session) => {
     const operation = await db.collection<Operation>('sync_operations').findOne({ _id: operationId, userId: lease.userId }, { session });
@@ -17,7 +31,7 @@ export async function finishRecoverySync(db: Db, lease: RecoveryLease, input: un
         new Set(operation.rowIds).size !== operation.rowIds.length || operation.results.some((r) => !operation.rowIds.includes(r.id))) {
       throw new Error('recovery_settlement_operation_invalid');
     }
-    const rows = (await journal(db).find({ operationId, userId: lease.userId }, { session }).toArray()).map((row) => noteWriteIntentSchema.parse(row));
+    const rows = (await journal(db).find({ operationId, userId: lease.userId }, { session }).limit(51).toArray()).map((row) => noteWriteIntentSchema.parse(row));
     if (rows.length > operation.rowIds.length || new Set(rows.map((row) => row.noteId)).size !== rows.length) {
       throw new Error('recovery_settlement_manifest_invalid');
     }
@@ -40,13 +54,13 @@ export async function finishRecoverySync(db: Db, lease: RecoveryLease, input: un
       } else if (successes.length || (operation.status === 'complete' && ['prepared', 'verified'].includes(row.state))) {
         throw new Error('recovery_settlement_commit_mismatch');
       }
-      if (['prepared', 'verified'].includes(row.state) && row.leaseToken !== lease.token) throw new Error('recovery_settlement_lease_mismatch');
+      if (!abandonUnfinished && ['prepared', 'verified'].includes(row.state) && row.leaseToken !== lease.token) throw new Error('recovery_settlement_lease_mismatch');
     }
     const settled = await finishSyncInSession(db, operation, session);
     for (const row of rows) {
       if (!['prepared', 'verified'].includes(row.state)) continue;
-      const next = noteWriteIntentSchema.parse({ ...row, state: 'abandoned', terminalReason: 'write_interrupted', updatedAt: new Date() });
-      const changed = await journal(db).replaceOne({ _id: row._id, state: row.state, leaseToken: lease.token, wipeEpoch: lease.wipeEpoch }, next, { session });
+      const next = noteWriteIntentSchema.parse({ ...row, leaseToken: lease.token, state: 'abandoned', terminalReason: 'write_interrupted', updatedAt: new Date() });
+      const changed = await journal(db).replaceOne({ _id: row._id, state: row.state, leaseToken: row.leaseToken, wipeEpoch: lease.wipeEpoch }, next, { session });
       if (changed.matchedCount !== 1) throw new Error('recovery_settlement_intent_changed');
     }
     if (afterWrites) await afterWrites(session);
