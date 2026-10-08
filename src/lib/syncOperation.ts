@@ -1,7 +1,7 @@
 import { appendLedger } from './ledger.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Db, ClientSession } from 'mongodb';
-import { collections } from '../db/collections.js';
+import { collections, type AtomicUserDoc } from '../db/collections.js';
 import { withTransaction } from '../db/mongo.js';
 import { ENERGY, EnergyError, dailyGrantDue, energyGrantDaily, energyWallet } from './energy.js';
 import { httpError } from './httpError.js';
@@ -17,7 +17,7 @@ export const syncOperations = (db: Db) => db.collection<SyncOperation>('sync_ope
 
 const operationId = (userId: string, requestId: string) => `${userId}:${requestId}`;
 const mismatch = () => Object.assign(new Error('sync_request_mismatch'), { status: 409 });
-const fingerprintOf = (rows: unknown[], mode: string) => createHash('sha256').update(JSON.stringify({ rows, mode })).digest('hex');
+export const fingerprintOf = (rows: unknown[], mode: string) => createHash('sha256').update(JSON.stringify({ rows, mode })).digest('hex');
 
 /**
  * Returns the recorded operation for a request ID, if any. A completed
@@ -57,10 +57,7 @@ export async function openSync(db: Db, userId: string, requestId: string, rows: 
   const now = new Date();
   // A standard sync may start once per interval, by the Server's clock. Nothing is recorded or charged when it
   // is refused; instant sync is the way to send changes sooner.
-  if (mode === 'standard' && wallet.lastStandardSyncAt !== null) {
-    const waitMs = wallet.lastStandardSyncAt.getTime() + ENERGY.standardSyncIntervalMs - now.getTime();
-    if (waitMs > 0) throw httpError('sync_cooldown', 429, { retry_after_seconds: Math.ceil(waitMs / 1000) });
-  }
+  assertSyncWindow(mode, wallet, now);
   if (rows.length === 0) {
     // Nothing to charge, so there is nothing to keep atomic with the operation record.
     const operation: SyncOperation = { _id: operationId(userId, requestId), userId, fingerprint, mode, rowIds: rows.map((row) => row.id),
@@ -68,21 +65,33 @@ export async function openSync(db: Db, userId: string, requestId: string, rows: 
     await syncOperations(db).insertOne(operation);
     return operation;
   }
-  return withTransaction(async (session) => {
-    const current = (await collections.atomicUsers(db).findOne({ _id: userId }, { session }))!;
-    const charged = mode === 'instant' ? ENERGY.syncInstantCost : ENERGY.syncStandardCost;
-    if (current.energy < charged) throw new EnergyError('insufficient_energy');
-    const operation: SyncOperation = { _id: operationId(userId, requestId), userId, fingerprint, mode, rowIds: rows.map((row) => row.id),
-      charged, createdAt: now, previousStandardAt: current.lastStandardSyncAt, status: 'pending', results: [], refunded: 0 };
-    await collections.atomicUsers(db).updateOne({ _id: userId }, {
-      $inc: { energy: -charged }, ...(mode === 'standard' ? { $set: { lastStandardSyncAt: now } } : {}),
-    }, { session });
-    await appendLedger(db, session, { _id: randomUUID(), userId, kind: 'spend', coinsDelta: 0,
-      energyDelta: -charged, resultingCoins: current.coins, resultingEnergy: current.energy - charged,
-      note: `${mode === 'instant' ? 'Instant' : 'Standard'} sync`, createdAt: now }, current);
-    await syncOperations(db).insertOne(operation, { session });
-    return operation;
-  });
+  return withTransaction((session) => debitSyncInSession(db, userId, requestId, rows, mode, fingerprint, now, session));
+}
+
+/** Shared unchanged hourly policy, evaluated with the caller's wallet/time. */
+export function assertSyncWindow(mode: 'standard' | 'instant', wallet: Pick<AtomicUserDoc, 'lastStandardSyncAt'>, now: Date) {
+  if (mode === 'standard' && wallet.lastStandardSyncAt !== null) {
+    const waitMs = wallet.lastStandardSyncAt.getTime() + ENERGY.standardSyncIntervalMs - now.getTime();
+    if (waitMs > 0) throw httpError('sync_cooldown', 429, { retry_after_seconds: Math.ceil(waitMs / 1000) });
+  }
+}
+
+/** Existing paid debit/ledger/operation body in a caller-owned session. */
+export async function debitSyncInSession(db: Db, userId: string, requestId: string, rows: { id: string }[],
+  mode: 'standard' | 'instant', fingerprint: string, now: Date, session: ClientSession): Promise<SyncOperation> {
+  const current = (await collections.atomicUsers(db).findOne({ _id: userId }, { session }))!;
+  const charged = mode === 'instant' ? ENERGY.syncInstantCost : ENERGY.syncStandardCost;
+  if (current.energy < charged) throw new EnergyError('insufficient_energy');
+  const operation: SyncOperation = { _id: operationId(userId, requestId), userId, fingerprint, mode, rowIds: rows.map((row) => row.id),
+    charged, createdAt: now, previousStandardAt: current.lastStandardSyncAt, status: 'pending', results: [], refunded: 0 };
+  await collections.atomicUsers(db).updateOne({ _id: userId }, {
+    $inc: { energy: -charged }, ...(mode === 'standard' ? { $set: { lastStandardSyncAt: now } } : {}),
+  }, { session });
+  await appendLedger(db, session, { _id: randomUUID(), userId, kind: 'spend', coinsDelta: 0,
+    energyDelta: -charged, resultingCoins: current.coins, resultingEnergy: current.energy - charged,
+    note: `${mode === 'instant' ? 'Instant' : 'Standard'} sync`, createdAt: now }, current);
+  await syncOperations(db).insertOne(operation, { session });
+  return operation;
 }
 
 /** Settle every pending operation of a user. Same precondition as [beginSync]. */
