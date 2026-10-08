@@ -19,6 +19,14 @@ const operationId = (userId: string, requestId: string) => `${userId}:${requestI
 const mismatch = () => Object.assign(new Error('sync_request_mismatch'), { status: 409 });
 export const fingerprintOf = (rows: unknown[], mode: string) => createHash('sha256').update(JSON.stringify({ rows, mode })).digest('hex');
 
+/** Refuse tagged pending work, including an unsupported future format. The
+ * legacy path cannot reconcile its generations or close its journal safely.
+ * This does not activate the recovery writer or read any new collection.
+ */
+const needsRecovery = (operation: SyncOperation) =>
+  operation.status === 'pending' && (operation as SyncOperation & { recoveryFormat?: unknown }).recoveryFormat !== undefined;
+const recoveryRequired = () => httpError('sync_recovery_required', 409);
+
 /**
  * Returns the recorded operation for a request ID, if any. A completed
  * operation is the authoritative answer to a retry, so callers use this
@@ -28,6 +36,7 @@ export async function findSync(db: Db, userId: string, requestId: string, rows: 
   const previous = await syncOperations(db).findOne({ _id: operationId(userId, requestId) });
   if (!previous) return null;
   if (previous.fingerprint !== fingerprintOf(rows, mode)) throw mismatch();
+  if (needsRecovery(previous)) throw recoveryRequired();
   return previous;
 }
 
@@ -94,9 +103,14 @@ export async function debitSyncInSession(db: Db, userId: string, requestId: stri
   return operation;
 }
 
-/** Settle every pending operation of a user. Same precondition as [beginSync]. */
+/** Settle untagged pending work only; recovery work requires its coordinator.
+ * Same lock precondition as [beginSync].
+ */
 export async function settleAbandonedSyncs(db: Db, userId: string) {
-  for (const operation of await syncOperations(db).find({ userId, status: 'pending' }).toArray()) {
+  const pending = await syncOperations(db).find({ userId, status: 'pending' }).toArray();
+  // Check the entire existing result before closing any legacy operation.
+  if (pending.some(needsRecovery)) throw recoveryRequired();
+  for (const operation of pending) {
     await finishSync(db, operation);
   }
 }
