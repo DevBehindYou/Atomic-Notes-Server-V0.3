@@ -5,7 +5,9 @@ import { assertRecoveryPreimageInSession } from './recoveryIntent.js';
 import { withRecoveryFence, type RecoveryLease } from './recoveryGate.js';
 import type { SyncOperation } from './syncOperation.js';
 
-/** Inactive same-epoch live-row recovery. Never recreates an operation or file. */
+/** Inactive same-epoch generation recovery, including delete/restore targets.
+ * Never recreates an operation or file; deletion only changes Mongo metadata.
+ */
 export async function adoptRecoveryOperation(db: Db, lease: RecoveryLease, input: unknown,
   afterWrites?: (session: ClientSession) => Promise<void>): Promise<NoteWriteIntent[]> {
   const operationId = z.string().length(73).parse(input);
@@ -37,7 +39,7 @@ export async function adoptRecoveryOperation(db: Db, lease: RecoveryLease, input
       }
       if (result?.ok) throw new Error('recovery_adoption_commit_mismatch');
       if (row.state === 'abandoned' || row.state === 'superseded') { rows.push(row); continue; }
-      if (result || row.targetFlags.deleted || !row.stagedFileId) throw new Error('recovery_adoption_unfinished_invalid');
+      if (result || !row.stagedFileId) throw new Error('recovery_adoption_unfinished_invalid');
       await assertRecoveryPreimageInSession(db, row, session);
       const adopted = noteWriteIntentSchema.parse({ ...row, leaseToken: lease.token, updatedAt: new Date() });
       const changed = await journal.replaceOne({ _id: row._id, state: row.state, leaseToken: row.leaseToken,
