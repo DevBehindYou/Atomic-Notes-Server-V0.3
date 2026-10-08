@@ -186,3 +186,11 @@ jobs:
           path: ci-recovery-batch-proof.json
           if-no-files-found: ignore
           retention-days: 7
+      - name: Upload sanitized recovery delete proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitized-recovery-delete-proof
+          path: ci-recovery-delete-proof.json
+          if-no-files-found: ignore
+          retention-days: 7

@@ -9,7 +9,9 @@ import { assertSyncWindow, debitSyncInSession, fingerprintOf, syncOperations, ty
 import { prepareRecoveryIntentsInSession } from './recoveryIntent.js';
 import { withRecoveryFence, type RecoveryLease } from './recoveryGate.js';
 
-/** Inactive live-row admission only. No production route imports this module. */
+/** Inactive generation admission. Deleted/restore rows retain immutable content;
+ * no production route imports this module or performs this protocol yet.
+ */
 type Operation = SyncOperation & { recoveryFormat: 1 };
 export async function beginRecoverySync(db: Db, lease: RecoveryLease, request: unknown, input: unknown,
   selectedMode: unknown, manifests: unknown, afterWrites?: (session: ClientSession) => Promise<void>) {
@@ -22,7 +24,7 @@ export async function beginRecoverySync(db: Db, lease: RecoveryLease, request: u
       intents.some((intent, i) => intent.operationId !== id || intent.userId !== lease.userId ||
         intent.fingerprint !== fingerprint || intent.noteId !== rows[i].id || intent.expectedVersion !== rows[i].base_version ||
         intent.state !== 'prepared' || intent.leaseToken !== lease.token || intent.wipeEpoch !== lease.wipeEpoch ||
-        !intent.stagedFileId || rows[i].deleted || intent.targetFlags.deleted || intent.targetHash !== noteContentHash(rows[i]) ||
+        !intent.stagedFileId || intent.targetFlags.deleted !== rows[i].deleted || intent.targetHash !== noteContentHash(rows[i]) ||
         intent.targetFlags.kind !== rows[i].kind || intent.targetFlags.pinned !== rows[i].pinned || intent.targetFlags.encV !== rows[i].enc_v)) {
     throw new Error('recovery_admission_manifest_invalid');
   }
