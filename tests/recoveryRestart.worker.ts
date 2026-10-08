@@ -8,7 +8,8 @@ import { remoteNoteRowSchema } from '../src/types/noteWire.js';
 import { noteContentHash } from '../src/lib/contentHash.js';
 
 // Test-only worker: no dotenv, inherited credential inventory or raw diagnostics.
-const inputSchema = z.object({ phase: z.enum(['prepared', 'verified', 'committed', 'settled', 'replayed']),
+const inputSchema = z.object({ phase: z.enum(['prepared', 'verified', 'committed', 'settled', 'replayed',
+  'uncertain', 'waiting', 'resumed', 'resumed_replay']),
   database: z.string(), owner: z.string().uuid(), requestId: z.string().uuid(),
   noteIds: z.array(z.string().uuid()).length(2), createdAt: z.string().datetime(), driveOrigin: z.string() }).strict();
 
@@ -27,6 +28,7 @@ async function run(input: unknown) {
   const { stageRecoveryIntent } = await import('../src/lib/recoveryIntent.js');
   const { commitRecoveryIntents } = await import('../src/lib/recoveryCommit.js');
   const { finishRecoverySync } = await import('../src/lib/recoverySettlement.js');
+  const { resumeRecoveryOperation } = await import('../src/lib/recoveryResume.js');
   const { fingerprintOf } = await import('../src/lib/syncOperation.js');
   const db = await getDb(); assertFixtureCleanup(db.databaseName, args.database);
   const prior = await db.collection<{ _id: string; leaseExpiresAt: Date | null }>('note_sync_state').findOne({ _id: args.owner });
@@ -60,6 +62,26 @@ async function run(input: unknown) {
     },
     async update() { throw new Error('must_not_overwrite'); }, async delete() { throw new Error('must_not_delete'); },
   } } as unknown as drive_v3.Drive;
+  if (args.phase === 'uncertain') {
+    await beginRecoverySync(db, lease, args.requestId, rows, 'instant', intents);
+    // Parent persists this create but holds its response, then kills the worker.
+    await stageRecoveryIntent(db, lease, intents[0]._id, sdk, 'synthetic-parent', contents[0]);
+    throw new Error('synthetic_uncertain_response_must_stay_held');
+  }
+  if (args.phase === 'waiting' || args.phase === 'resumed' || args.phase === 'resumed_replay') {
+    const outcome = await resumeRecoveryOperation(db, lease, intents[0].operationId, sdk,
+      'synthetic-parent', args.phase === 'resumed' ? [contents[1]] : []);
+    if (args.phase === 'waiting') {
+      assert.deepEqual(outcome, { status: 'needs_client_content', noteIds: [args.noteIds[1]] });
+    } else {
+      assert.equal(outcome.status, 'complete');
+      if (outcome.status !== 'complete') throw new Error('synthetic_expected_receipt');
+      assert.equal(outcome.operation.charged, 10); assert.equal(outcome.operation.refunded, 0);
+      assert.equal(outcome.operation.results.length, 2);
+    }
+    await releaseRecoveryLease(db, lease); await closeDb();
+    process.send?.({ phase: args.phase }); process.disconnect?.(); return;
+  }
   if (args.phase === 'prepared' || args.phase === 'verified' || args.phase === 'replayed') {
     const started = await beginRecoverySync(db, lease, args.requestId, rows, 'instant', intents);
     if (args.phase === 'verified') for (let i = 0; i < intents.length; i++) {
