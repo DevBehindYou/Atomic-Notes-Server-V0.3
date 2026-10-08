@@ -16,3 +16,10 @@ with recovery-format work is a hypothesis to verify in the generated fixture.
 No production journal data, activation, index operation, cleanup or deployment
 is included. Even a passing guard applies only to updated code: older deployed
 workers that never knew this marker remain an explicit cutover/drain boundary.
+
+**Preserved assembly failure:** test-only head `29dc61e`, run `37836893325`,
+fails all four cases. The fixture explicitly allows only one instance per
+process; the test incorrectly attempted four. This does not provide the desired
+causal baseline or a passing replay control. The corrected assembly uses one
+fixture with four independently seeded owners and fixed HTTP status output.
+Production source is still unchanged for the rerun.
