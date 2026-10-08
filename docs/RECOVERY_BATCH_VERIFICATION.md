@@ -1,4 +1,4 @@
-# Inactive 50-row batch verification
+# Transaction validation and inactive 50-row batch verification
 
 **Verified in code:** `beginRecoverySync` validates a bounded ordered row/intent
 manifest before paid admission (`src/lib/recoveryAdmission.ts:17`).
@@ -44,6 +44,22 @@ from the direct error or that bulk result, and separates error classification
 from rollback snapshots in fixed phases. This is a source-based explanation,
 pending the corrected run; no generic rejection substitutes for validation.
 
+The third head `63a8398` failed run 37795026296 before reaching either new error
+classification phase. Its fixture step ran for 75 seconds; source inspection
+suggested the callback was retrying a masked validation error. A manual
+generated-database transaction now asserts the exact causal baseline: unordered
+mixed insert/update bulk surfaces code 251 with a transient-transaction label
+while retaining code 121 in the bulk result, and rolls back all mutations.
+That diagnosis becomes verified only when this exact baseline passes CI.
+
+**Verified in code:** the shared `saveNoteMetadataBatchInSession` writer now groups
+its independent inserts and updates and uses `ordered: true`. It stops on the
+first permanent rejection while preserving the preassigned request-order
+sequences/results. Grouping avoids an extra command group for every alternating
+row type. This wrapper serves the current route as well as the inactive kernel;
+its real production deployment has not changed. Route duplicate IDs are refused
+at `src/routes/notes.ts:176`. Full current-route integration CI remains required.
+
 Only allowlisted fixed phase/outcome values are uploaded in
 `ci-recovery-batch-proof.json`. Its passing outcome is asserted only after
 retrieval from a successful exact-head CI run.
@@ -53,4 +69,6 @@ loop is sequential; it is not a concurrency or throughput benchmark. This
 inactive helper does not prove production quota/auth/request-byte checks,
 native crypto, real Drive requests, process crashes, deleted/restore rows,
 automatic reconciliation, legacy repair or release readiness. Production routes
-and storage initialization are unchanged.
+and storage initialization are unchanged; their shared metadata writer changes
+error stopping behavior within the same transaction. No production data/index
+or deployment action is performed.

@@ -3,7 +3,7 @@ import test from 'node:test';
 import { randomUUID } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import type { drive_v3 } from 'googleapis';
-import { MongoBulkWriteError } from 'mongodb';
+import { MongoBulkWriteError, MongoClient } from 'mongodb';
 import type { DriveAdapter } from '../src/routes/notes.js';
 import { noteWriteIntentSchema, type NoteWriteIntent } from '../src/db/recoveryContract.js';
 import { noteContentHash } from '../src/lib/contentHash.js';
@@ -118,6 +118,34 @@ test('inactive fifty-row mixed batch rolls back atomically, commits ordered sequ
   const before = await snapshot(), beforeFiles = structuredClone([...files]);
   assert.equal(before.wallet!.energy, 80); assert.equal(before.ledger.length, initialLedger + 2); assert.equal(writes, 65);
   assert.equal(before.counter!.value, 15); assert.equal(before.notes.length, 15);
+  phase = 'unordered_bulk_baseline';
+  const baseline = await db.createCollection<{ _id: string; value: number }>('recovery_bulk_baseline', {
+    validator: { _id: { $ne: 'synthetic-refused' } }, validationLevel: 'strict', validationAction: 'error',
+  });
+  await baseline.insertOne({ _id: 'synthetic-existing', value: 1 });
+  // Manual transaction deliberately bypasses callback retry, exposing the
+  // unordered driver's original validator error and later abort separately.
+  const isolatedClient = new MongoClient(process.env.MONGODB_URI!);
+  try {
+    await isolatedClient.connect();
+    const isolatedDb = isolatedClient.db(db.databaseName); assertFixtureCleanup(isolatedDb.databaseName, fixture.database);
+    const session = isolatedClient.startSession();
+    try {
+      session.startTransaction();
+      await assert.rejects(isolatedDb.collection<{ _id: string; value: number }>('recovery_bulk_baseline').bulkWrite([
+        { updateOne: { filter: { _id: 'synthetic-existing' }, update: { $set: { value: 2 } } } },
+        { insertOne: { document: { _id: 'synthetic-accepted', value: 1 } } },
+        { insertOne: { document: { _id: 'synthetic-refused', value: 1 } } },
+      ], { session, ordered: false }), (error: unknown) => {
+        const masked = error instanceof MongoBulkWriteError && error.code === 251 &&
+          error.result.getWriteErrors().some((entry) => entry.code === 121) && error.hasErrorLabel('TransientTransactionError');
+        phase = masked ? 'unordered_masked_validation' : 'unordered_error_unclassified';
+        return masked;
+      });
+      await session.abortTransaction();
+    } finally { await session.endSession(); }
+  } finally { await isolatedClient.close(); }
+  assert.deepEqual(await baseline.find().toArray(), [{ _id: 'synthetic-existing', value: 1 }]);
   phase = 'metadata_rejection';
   await db.command({ collMod: 'notes', validator: { _id: { $ne: targets[49].id } }, validationLevel: 'strict', validationAction: 'error' });
   await assert.rejects(commitRecoveryIntents(db, lease, request.intents.map((row) => row._id), sdk, 'synthetic-parent'),
