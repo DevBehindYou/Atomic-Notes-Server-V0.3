@@ -1,3 +1,4 @@
+import { ENERGY } from './energyPolicy.js';
 import { validateOrderedHistory } from './ledgerSequence.js';
 import { appendLedger } from './ledger.js';
 import { randomUUID } from 'node:crypto';
@@ -27,16 +28,7 @@ import { coinOperationId, coinFingerprint, prepareCoinWallet, readCoinWallet, re
  * set of strings it's matching against.
  */
 
-export const ENERGY = {
-  coinToEnergy: 40,
-  dailyGrant: 20,
-  syncStandardCost: 5,
-  syncInstantCost: 10,
-  defaultEnergyCap: 120,
-  /** A standard sync may start at most once per interval, by the Server's clock. Instant sync has no interval. */
-  standardSyncIntervalMs: 60 * 60 * 1000, // 1 hour
-  dailyGrantWindowMs: 24 * 60 * 60 * 1000, // 24 hours
-} as const;
+export { ENERGY } from './energyPolicy.js';
 
 export interface NoteLimitTier {
   /** The note limit this tier grants. */
