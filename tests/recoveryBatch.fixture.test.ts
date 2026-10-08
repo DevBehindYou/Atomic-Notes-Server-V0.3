@@ -38,6 +38,9 @@ test('inactive fifty-row mixed batch rolls back atomically, commits ordered sequ
   const { commitRecoveryIntents } = await import('../src/lib/recoveryCommit.js');
   const { finishRecoverySync } = await import('../src/lib/recoverySettlement.js');
   const db = await getDb(); assertFixtureCleanup(db.databaseName, fixture.database);
+  // Explicit generated-fixture tier, not a purchase or production policy change.
+  await collections.atomicUsers(db).updateOne({ _id: fixture.owner }, { $set: { noteLimit: 100 } });
+  const initialLedger = await collections.energyLedger(db).countDocuments({ userId: fixture.owner });
   const lease = await acquireRecoveryLease(db, fixture.owner);
   cleanupLease = () => releaseRecoveryLease(db, lease);
   await collections.googleAccounts(db).updateOne({ userId: fixture.owner }, { $set: { driveRootFolderId: 'synthetic-parent' } });
@@ -112,7 +115,7 @@ test('inactive fifty-row mixed batch rolls back atomically, commits ordered sequ
   assert.deepEqual(await snapshot(), beforeInvalid); assert.equal(writes, 15);
   const request = await make(targets); await admitAndStage(request);
   const before = await snapshot(), beforeFiles = structuredClone([...files]);
-  assert.equal(before.wallet!.energy, 80); assert.equal(before.ledger.length, 2); assert.equal(writes, 65);
+  assert.equal(before.wallet!.energy, 80); assert.equal(before.ledger.length, initialLedger + 2); assert.equal(writes, 65);
   assert.equal(before.counter!.value, 15); assert.equal(before.notes.length, 15);
   phase = 'metadata_rejection';
   await db.command({ collMod: 'notes', validator: { _id: { $ne: targets[49].id } }, validationLevel: 'strict', validationAction: 'error' });
@@ -138,7 +141,7 @@ test('inactive fifty-row mixed batch rolls back atomically, commits ordered sequ
   const receipt = await finishRecoverySync(db, lease, request.operationId);
   assert.equal(receipt.results.length, 50); assert.equal(receipt.charged, 10); assert.equal(receipt.refunded, 0);
   assert.deepEqual(receipt.results.map((row) => row.id), targets.map((file) => file.id));
-  const after = await snapshot(); assert.equal(after.wallet!.energy, 80); assert.equal(after.ledger.length, 2);
+  const after = await snapshot(); assert.equal(after.wallet!.energy, 80); assert.equal(after.ledger.length, initialLedger + 2);
   assert.equal(after.counter!.value, 65); assert.equal(after.notes.length, 50); assert.equal(writes, 65);
   for (let i = 0; i < originals.length; i++) assert.deepEqual(files.get(initial.intents[i].stagedFileId!), originals[i]);
   await releaseRecoveryLease(db, lease); cleanupLease = undefined;

@@ -29,6 +29,13 @@ over five ten-row pages, preserving kind, content, flags, payload and versions.
 Both the older seed receipt and the newer 50-row receipt are replayed through
 the actual push route without financial, metadata, intent or file changes.
 
+**Observed fixture failure:** first head `709cbdb` failed run 37793744186 at
+`bounded_admission`. Source inspection found its absolute ledger count omitted
+the fixture's welcome-credit entry; the corrected test measures additions from
+the initial ledger and explicitly grants only a synthetic 100-note fixture tier.
+This explanation is inferred from source and phase evidence; no raw failure
+logs were retrieved. The failed artifact is preserved separately from retries.
+
 Only allowlisted fixed phase/outcome values are uploaded in
 `ci-recovery-batch-proof.json`. Its passing outcome is asserted only after
 retrieval from a successful exact-head CI run.
