@@ -20,7 +20,7 @@ async function pendingOperation(db: Db, row: NoteWriteIntent, session: ClientSes
   return operation;
 }
 
-async function preimage(db: Db, row: NoteWriteIntent, session: ClientSession) {
+export async function assertRecoveryPreimageInSession(db: Db, row: NoteWriteIntent, session: ClientSession) {
   const note = await collections.notes(db).findOne({ _id: row.noteId }, { session });
   if (row.expectedVersion === 0) {
     if (note) throw new Error('recovery_preimage_changed');
@@ -54,7 +54,7 @@ export async function prepareRecoveryIntentsInSession(db: Db, lease: RecoveryLea
   const result: NoteWriteIntent[] = [];
   for (const row of rows) {
     if (operation.results.some((stored) => stored.id === row.noteId)) throw new Error('recovery_row_already_settled');
-    await preimage(db, row, session);
+    await assertRecoveryPreimageInSession(db, row, session);
     const raw = await intents(db).findOne({ _id: row._id }, { session });
     if (!raw) { await intents(db).insertOne(row, { session }); result.push(row); continue; }
     const current = noteWriteIntentSchema.parse(raw);
@@ -81,7 +81,7 @@ export async function stageRecoveryIntent(db: Db, lease: RecoveryLease, intentId
     const current = noteWriteIntentSchema.parse(raw);
     if (!['prepared', 'verified'].includes(current.state) || current.leaseToken !== lease.token ||
         current.wipeEpoch !== lease.wipeEpoch || !current.stagedFileId) throw new Error('recovery_intent_not_stageable');
-    await pendingOperation(db, current, session); await preimage(db, current, session);
+    await pendingOperation(db, current, session); await assertRecoveryPreimageInSession(db, current, session);
     return current;
   });
   const content = migrateAtomicFile(input);
@@ -96,7 +96,7 @@ export async function stageRecoveryIntent(db: Db, lease: RecoveryLease, intentId
     const current = noteWriteIntentSchema.parse(raw);
     if (!['prepared', 'verified'].includes(current.state) || current.leaseToken !== lease.token ||
         current.wipeEpoch !== lease.wipeEpoch || manifest(current) !== manifest(row)) throw new Error('recovery_intent_mismatch');
-    await pendingOperation(db, current, session); await preimage(db, current, session);
+    await pendingOperation(db, current, session); await assertRecoveryPreimageInSession(db, current, session);
     const verified = noteWriteIntentSchema.parse({ ...current, state: 'verified', updatedAt: new Date() });
     const changed = await intents(db).replaceOne({ _id: row._id, state: current.state, leaseToken: lease.token }, verified, { session });
     if (changed.matchedCount !== 1) throw new Error('recovery_intent_changed');
