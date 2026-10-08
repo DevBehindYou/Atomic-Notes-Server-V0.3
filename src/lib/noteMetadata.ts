@@ -116,7 +116,14 @@ export async function saveNoteMetadataBatchInSession(
     }
   });
 
-  await collections.notes(db).bulkWrite(ops, { session, ordered: false });
+  // An unordered driver bulk can continue with another command after Mongo
+  // aborts this transaction for validation, masking code 121 with a retryable
+  // NoSuchTransaction. Stop on the first failure. Group independent inserts
+  // and updates so interleaved rows still use at most two bulk command groups;
+  // sequences and receipt order were already assigned in request order above.
+  const grouped = [...ops.filter((op) => 'insertOne' in op), ...ops.filter((op) => 'updateOne' in op)];
+  if (grouped.length !== ops.length) throw new Error('note_metadata_operation_invalid');
+  await collections.notes(db).bulkWrite(grouped, { session, ordered: true });
 
   // A blind update reports no per-row match count; a follow-up read (inside the same
   // transaction, so it sees the write just made) finds any target that had vanished.
