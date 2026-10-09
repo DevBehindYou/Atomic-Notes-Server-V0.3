@@ -8,6 +8,7 @@ import type { Db } from 'mongodb';
 import type { DriveAdapter } from '../src/routes/notes.js';
 import { assertFixtureCleanup, fixtureDatabase } from './clientFixtureSafety.js';
 import { fixtureFailureIds, fixtureReadFault, fixtureRefundFault } from './clientFixtureFaults.js';
+import { clientFixtureOptions } from './clientFixtureOptions.js';
 
 // Public, synthetic credentials valid only in this generated test database.
 export const FIXTURE_TOKENS = {
@@ -151,7 +152,7 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
     };
     const app = new Hono();
     registerErrorHandler(app);
-    app.route('/api/notes', createNotesRoute(notesDrive ?? drive, options));
+    app.route('/api/notes', createNotesRoute(notesDrive ?? drive, { logoutSync: options.logoutSync === true }));
     // The real logout route performs only session revocation/logging. Google
     // sign-in routes are not invoked by this synthetic-session harness.
     app.route('/api/auth', authRoute);
@@ -203,7 +204,8 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   try {
-    const fixture = await startClientFixture(process.env.MONGODB_URI, process.env.MONGODB_DB_NAME);
+    const options = clientFixtureOptions(process.argv.slice(2));
+    const fixture = await startClientFixture(process.env.MONGODB_URI, process.env.MONGODB_DB_NAME, undefined, options);
     console.log(JSON.stringify({ origin: fixture.origin, database: fixture.database }));
     const stop = () => { void fixture.close().then(() => process.exit(0), () => process.exit(1)); };
     process.once('SIGINT', stop); process.once('SIGTERM', stop);
