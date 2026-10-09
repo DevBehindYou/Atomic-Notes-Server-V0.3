@@ -50,6 +50,8 @@ export const sessionSchema = z.object({
   expiresAt: z.date(),
   revoked: z.boolean().default(false),
   userAgent: z.string().nullable().optional(),
+  logoutAttemptId: z.string().optional(),
+  logoutAttemptRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
 });
 export type SessionDoc = z.infer<typeof sessionSchema>;
 
@@ -90,6 +92,7 @@ export const atomicUserSchema = z.object({
   coinPolicyActivatedAt: z.date().optional(),
   coins: z.number().int().default(5), // welcome gift, new wallets only
   energy: z.number().int().default(0),
+  logoutFundingRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
   energyCap: z.number().int().default(120),
   lastDailyGrantAt: z.date().nullable().default(null),
   lastStandardSyncAt: z.date().nullable().default(null),
