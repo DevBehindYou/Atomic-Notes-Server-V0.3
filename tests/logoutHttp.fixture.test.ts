@@ -44,6 +44,18 @@ test('opt-in logout HTTP writes, replays and completes only acknowledged notes',
   const disabled = createNotesRoute(undefined, { logoutSync: false });
   assert.equal((await disabled.request('http://localhost/logout-attempt/complete', { method: 'POST',
     headers: { 'content-type': 'application/json' }, body: JSON.stringify({ attemptId: randomUUID() }) })).status, 404);
+  const capabilityBefore = await finance(fixture.owner), stateBefore = await state();
+  const disabledCapability = await disabled.request('http://localhost/logout-capability', {
+    headers: { authorization: `Bearer ${a}` },
+  });
+  assert.equal(disabledCapability.status, 200);
+  assert.deepEqual(await disabledCapability.json(), { available: false });
+  assert.equal((await disabled.request('http://localhost/logout-capability')).status, 401);
+  assert.deepEqual(await call(a, '/api/notes/logout-capability'), { status: 200, body: { available: true } });
+  assert.equal((await call('', '/api/notes/logout-capability')).status, 401);
+  assert.deepEqual(await finance(fixture.owner), capabilityBefore);
+  assert.deepEqual(await state(), stateBefore);
+  assert.equal(await db.collection('logout_attempts').countDocuments({ userId: fixture.owner }), 0);
   phase = 'free_admission_and_binding';
   await collections.atomicUsers(db).updateOne({ _id: fixture.owner }, { $set: { energy: 0 } });
   const free = plan([[row('Public synthetic first logout body')], [row('Public synthetic second logout body')]]);

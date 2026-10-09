@@ -94,6 +94,10 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
     c.header('Server-Timing', `total;dur=${Math.round(performance.now() - started)}, drive;dur=${Math.round(perf?.driveMs ?? 0)};desc="${perf?.driveCalls ?? 0} calls"`);
   }));
 
+  // Read-only preflight before the App persists a new frozen logout attempt.
+  // Availability is advisory; admission still rechecks the deployment gate.
+  notesRoute.get('/logout-capability', c => c.json({ available: logoutSync }));
+
   notesRoute.post('/logout-attempt', async c => {
     if (!logoutSync) return c.json({ error: 'logout_sync_unavailable' }, 404);
     const { attemptId, batches } = z.object({ attemptId: z.string().uuid(),
