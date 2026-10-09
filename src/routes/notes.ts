@@ -1,7 +1,11 @@
 import { saveNoteMetadata, saveNoteMetadataBatch, type NoteMetadataEntry } from '../lib/noteMetadata.js';
 import { finishSync, findSync, openSync, recordSyncResult, settleAbandonedSyncs, type SyncOperation } from '../lib/syncOperation.js';
 import { currentPerf, runWithPerf, timedDrive } from '../lib/perf.js';
-import { NOTE_LIMIT } from '../lib/energy.js';
+import { NOTE_LIMIT, ENERGY } from '../lib/energy.js';
+import { createHash } from 'node:crypto';
+import { admitLogoutAttempt, findLogoutBatch, openLogoutBatch, settleLogoutBatch,
+  completeLogoutAttempt, abortLogoutAttempt } from '../lib/logoutAttempt.js';
+import { logoutBatchSchema, LOGOUT_BOUNDS } from '../lib/logoutContract.js';
 import { noteContentHash } from '../lib/contentHash.js';
 import { acquireOperationLock } from '../lib/operationLock.js';
 import { remoteNoteRowSchema } from '../types/noteWire.js';
@@ -37,7 +41,10 @@ const DRIVE_CONCURRENCY = 8;
 /** Rows per pull page. All of a page's Drive reads run at once, so a page costs one Drive round trip. */
 const PULL_PAGE = 10;
 
-export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateNoteFile, deleteNoteFile, getNoteFileContent }) {
+export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateNoteFile, deleteNoteFile, getNoteFileContent },
+  options: { logoutSync?: boolean } = {}) {
+  // Rollout is disabled until Server/App acceptance and deployment approval.
+  const logoutSync = options.logoutSync ?? process.env.ATOMIC_LOGOUT_SYNC_ENABLED === 'true';
   // Every Drive call is timed so a slow request shows how much of it was Google (see Server-Timing).
   // Rate limits and passing Google errors are retried with backoff inside the timing.
   const createNoteFile = (...args: Parameters<DriveAdapter['createNoteFile']>) => timedDrive(() => withDriveRetry(() => drive.createNoteFile(...args)));
@@ -51,6 +58,23 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
   const usePush = (c: Context) => c.json({ error: 'use_push', hint: 'Write notes through POST /notes/push.' }, 410);
   notesRoute.post('/', usePush);
   notesRoute.patch('/:id', usePush);
+  // Completion replay is deliberately before normal live-session authentication:
+  // a successful prior completion revoked this token. Only its own immutable
+  // receipt is returned; a still-open attempt must pass live-session checks.
+  notesRoute.post('/logout-attempt/complete', async c => {
+    if (!logoutSync) return c.json({ error: 'logout_sync_unavailable' }, 404);
+    const authorization = c.req.header('authorization');
+    if (!authorization?.startsWith('Bearer ')) return c.json({ error: 'missing_token' }, 401);
+    const token = authorization.slice(7), db = await getDb();
+    const owner = await collections.sessions(db).findOne({ _id: createHash('sha256').update(token).digest('hex') }, { projection: { userId: 1 } });
+    if (!owner) return c.json({ error: 'invalid_token' }, 401);
+    const { attemptId } = z.object({ attemptId: z.string().uuid() }).strict().parse(await c.req.json());
+    const release = await acquireOperationLock(db, `notes:${owner.userId}`, 15000);
+    try {
+      const result = await completeLogoutAttempt(db, owner.userId, token, attemptId);
+      return c.json({ ok: true, attemptId: result.attemptId, state: result.state });
+    } finally { await release(); }
+  });
   notesRoute.use('*', requireAuth);
   notesRoute.use('*', (c, next) => runWithPerf(async () => {
     const started = performance.now();
@@ -59,7 +83,8 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
     const readOnly = ['GET', 'HEAD'].includes(c.req.method);
     const release = readOnly ? null : await acquireOperationLock(await getDb(), `notes:${c.get('userId')}`, 15000);
     try {
-      if (!readOnly && !c.req.path.endsWith('/push')) {
+      const logoutPath = c.req.path.endsWith('/logout-attempt') || c.req.path.endsWith('/logout-attempt/abort');
+      if (!readOnly && !c.req.path.endsWith('/push') && !logoutPath) {
         // The lock is ours, so an operation still pending belongs to a request that died.
         await settleAbandonedSyncs(await getDb(), c.get('userId'));
       }
@@ -68,6 +93,21 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
     const perf = currentPerf();
     c.header('Server-Timing', `total;dur=${Math.round(performance.now() - started)}, drive;dur=${Math.round(perf?.driveMs ?? 0)};desc="${perf?.driveCalls ?? 0} calls"`);
   }));
+
+  notesRoute.post('/logout-attempt', async c => {
+    if (!logoutSync) return c.json({ error: 'logout_sync_unavailable' }, 404);
+    const { attemptId, batches } = z.object({ attemptId: z.string().uuid(),
+      batches: z.array(logoutBatchSchema).min(1).max(LOGOUT_BOUNDS.batches) }).strict().parse(await c.req.json());
+    const result = await admitLogoutAttempt(await getDb(), c.get('userId'), c.get('sessionToken'), attemptId, batches);
+    return c.json({ attemptId: result.attemptId, funding: result.funding, batches: result.batches.length,
+      costPerBatch: result.funding === 'emergency' ? 0 : ENERGY.syncInstantCost });
+  });
+  notesRoute.post('/logout-attempt/abort', async c => {
+    if (!logoutSync) return c.json({ error: 'logout_sync_unavailable' }, 404);
+    const { attemptId } = z.object({ attemptId: z.string().uuid() }).strict().parse(await c.req.json());
+    const result = await abortLogoutAttempt(await getDb(), c.get('userId'), c.get('sessionToken'), attemptId);
+    return c.json({ ok: true, attemptId: result.attemptId, state: result.state });
+  });
 
   /** Loads this user's Google tokens, refreshing the access token first if it's about to expire. */
   async function getLiveGoogleTokens(db: Awaited<ReturnType<typeof getDb>>, userId: string) {
@@ -171,14 +211,17 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
     const pushStarted = performance.now();
     const userId = c.get('userId') as string;
     const db = await getDb();
-    const { rows, requestId, mode } = z.object({ rows: z.array(remoteNoteRowSchema).max(MAX_PUSH_ROWS), requestId: z.string().uuid(), mode: z.enum(['standard', 'instant']).default('standard') }).parse(await c.req.json());
+    const { rows, requestId, mode, logoutAttemptId } = z.object({ rows: z.array(remoteNoteRowSchema).max(MAX_PUSH_ROWS), requestId: z.string().uuid(), mode: z.enum(['standard', 'instant']).default('standard'), logoutAttemptId: z.string().uuid().optional() }).parse(await c.req.json());
+    if (logoutAttemptId && (!logoutSync || mode !== 'instant')) return c.json({ error: 'logout_sync_unavailable' }, 409);
     if (rows.length === 0) return c.json({ ok: true, results: [] });
     if (new Set(rows.map((row) => row.id)).size !== rows.length) {
       return c.json({ error: 'duplicate_note_ids' }, 400);
     }
     // A finished request is answered from its record before any check that depends on
     // current state (quota, Google tokens): those must not block recovery of a delivered sync.
-    const recorded = await findSync(db, userId, requestId, rows, mode);
+    const recorded = logoutAttemptId
+      ? await findLogoutBatch(db, userId, c.get('sessionToken'), logoutAttemptId, requestId, rows)
+      : await findSync(db, userId, requestId, rows, mode);
     if (recorded?.status === 'complete') return pushResponse(c, recorded);
 
     // One lookup serves both: reject another account's IDs before touching Drive, and find this user's existing notes.
@@ -206,7 +249,9 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
     }
 
     const { accessToken, refreshToken, driveFolderId } = await getLiveGoogleTokens(db, userId);
-    const operation = recorded ?? await openSync(db, userId, requestId, rows, mode);
+    const operation = recorded ?? (logoutAttemptId
+      ? await openLogoutBatch(db, userId, c.get('sessionToken'), logoutAttemptId, requestId, rows)
+      : await openSync(db, userId, requestId, rows, mode));
     const decided = new Set(operation.results.map((result) => result.id));
 
     // Files and folders the user deleted in Drive are recreated instead of failing every later push. Notes are
@@ -386,7 +431,9 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
         }
       }
     }
-    const completed = await finishSync(db, operation);
+    const completed = logoutAttemptId
+      ? await settleLogoutBatch(db, userId, c.get('sessionToken'), logoutAttemptId, requestId)
+      : await finishSync(db, operation);
 
     // ms is the whole handler; driveMs is the part spent waiting for Google.
     await logEvent(db, 'notes_pushed', { userId, meta: {

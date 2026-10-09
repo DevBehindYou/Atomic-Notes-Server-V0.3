@@ -9,8 +9,8 @@ import { logoutAttemptSchema, logoutBatchSchema, logoutBatchFingerprint, logoutR
   LOGOUT_BOUNDS, selectLogoutFunding, type LogoutAttempt } from './logoutContract.js';
 import { remoteNoteRowSchema } from '../types/noteWire.js';
 
-/** Inactive helpers: callers must hold the notes lock and reconcile older work.
- * No production route imports this module. Only metadata is stored here.
+/** Rollout-gated helpers: callers must hold the notes lock and reconcile older work.
+ * Routes enable these only through the explicit logout rollout gate. Metadata only.
  */
 type BoundSession = SessionDoc & { logoutAttemptId?: string; logoutAttemptRevision?: number };
 type BoundOperation = SyncOperation & { logoutAttemptId: string; logoutSessionHash: string };
@@ -128,6 +128,47 @@ export async function openLogoutBatch(db: Db, user: unknown, rawToken: string, a
       { $set: { logoutAttemptId: ctx.id, logoutSessionHash: ctx.sessionHash } }, { session });
     await afterWrites?.();
     return bound;
+  });
+}
+
+/** Authorize/replay before quota or Drive-token preflight, without charging. */
+export async function findLogoutBatch(db: Db, user: unknown, rawToken: string, attempt: unknown,
+  request: unknown, input: unknown) {
+  const ctx = identity(user, rawToken, attempt), requestId = z.string().uuid().parse(request);
+  const rows = z.array(remoteNoteRowSchema).min(1).max(LOGOUT_BOUNDS.rowsPerBatch).parse(input);
+  const fingerprint = logoutBatchFingerprint(rows);
+  const wireBytes = Buffer.byteLength(JSON.stringify({ rows, requestId, mode: 'instant', logoutAttemptId: ctx.attemptId }));
+  return withTransaction(async session => {
+    await liveSession(db, ctx, session, true);
+    const admitted = await activeAttempt(db, ctx, session), batch = admitted.batches.find(b => b.requestId === requestId);
+    if (!batch || batch.fingerprint !== fingerprint || wireBytes > batch.wireBytes ||
+        rows.length !== batch.rowIds.length || rows.some((r, i) => r.id !== batch.rowIds[i])) throw denied('logout_batch_mismatch');
+    const previous = await syncOperations(db).findOne({ _id: `${ctx.userId}:${requestId}` }, { session }) as BoundOperation | null;
+    if (previous && (previous.fingerprint !== fingerprint || previous.mode !== 'instant' ||
+        previous.logoutAttemptId !== ctx.id || previous.logoutSessionHash !== ctx.sessionHash)) throw denied('logout_batch_mismatch');
+    return previous;
+  });
+}
+
+/** A failed frozen plan can be abandoned after every started batch is settled.
+ * Keep all receipts/charges/refunds; a new explicit logout gets a new decision.
+ */
+export async function abortLogoutAttempt(db: Db, user: unknown, rawToken: string, attempt: unknown) {
+  const ctx = identity(user, rawToken, attempt);
+  return withTransaction(async session => {
+    const seen = await liveSession(db, ctx, session, false);
+    const previous = await logoutAttempts(db).findOne({ _id: ctx.id, userId: ctx.userId, sessionHash: ctx.sessionHash }, { session });
+    if (!previous) throw denied('logout_attempt_missing');
+    const admitted = logoutAttemptSchema.parse(previous);
+    if (admitted.state === 'aborted') return admitted;
+    if (admitted.state !== 'prepared' || seen.logoutAttemptId !== ctx.id) throw denied('logout_attempt_closed');
+    if (await syncOperations(db).findOne({ userId: ctx.userId, status: 'pending' }, { session })) throw denied('logout_reconciliation_required');
+    await touchSession(db, ctx, session, seen);
+    await boundSessions(db).updateOne({ _id: ctx.sessionHash, userId: ctx.userId, logoutAttemptId: ctx.id },
+      { $unset: { logoutAttemptId: '' } }, { session });
+    const updatedAt = new Date();
+    await logoutAttempts(db).updateOne({ _id: ctx.id, state: 'prepared' }, { $set: { state: 'aborted', updatedAt } }, { session });
+    return { ...admitted, state: 'aborted' as const, updatedAt };
   });
 }
 

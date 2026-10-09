@@ -19,7 +19,8 @@ let started = false;
 // Deliberately public, usable only in this guarded generated test process.
 export const FIXTURE_ADMIN_KEY = 'atomic-disposable-admin-key';
 
-export async function startClientFixture(uri: string | undefined, selectedDatabase?: string, notesDrive?: DriveAdapter) {
+export async function startClientFixture(uri: string | undefined, selectedDatabase?: string, notesDrive?: DriveAdapter,
+  options: { logoutSync?: boolean } = {}) {
   const database = fixtureDatabase(uri, selectedDatabase);
   if (started) throw new Error('fixture_one_instance_per_process');
   started = true;
@@ -150,7 +151,7 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
     };
     const app = new Hono();
     registerErrorHandler(app);
-    app.route('/api/notes', createNotesRoute(notesDrive ?? drive));
+    app.route('/api/notes', createNotesRoute(notesDrive ?? drive, options));
     // The real logout route performs only session revocation/logging. Google
     // sign-in routes are not invoked by this synthetic-session harness.
     app.route('/api/auth', authRoute);

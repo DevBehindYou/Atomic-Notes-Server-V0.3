@@ -234,3 +234,11 @@ jobs:
           path: ci-logout-attempt-proof.json
           if-no-files-found: ignore
           retention-days: 7
+      - name: Upload sanitized logout HTTP proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitized-logout-http-proof
+          path: ci-logout-http-proof.json
+          if-no-files-found: ignore
+          retention-days: 7
