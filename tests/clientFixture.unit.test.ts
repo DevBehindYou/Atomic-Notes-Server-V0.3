@@ -2,6 +2,17 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { assertFixtureCleanup, fixtureDatabase } from './clientFixtureSafety.js';
 import { fixtureFailureIds, fixtureReadFault, fixtureRefundFault } from './clientFixtureFaults.js';
+import { clientFixtureOptions } from './clientFixtureOptions.js';
+
+test('client fixture defaults to disabled and permits only explicit logout opt-in', () => {
+  assert.deepEqual(clientFixtureOptions([]), { logoutSync: false });
+  assert.deepEqual(clientFixtureOptions(['--logout-sync']), { logoutSync: true });
+});
+for (const args of [['true'], ['--production'], ['--logout-sync', '--logout-sync'], ['--logout-sync', '--unknown']]) {
+  test(`client fixture refuses invalid opt-in ${args.join(' ')}`, () => {
+    assert.throws(() => clientFixtureOptions(args), /fixture_invalid_options/);
+  });
+}
 
 test('refund fault controls accept one bounded note and each explicit mode', () => {
   const noteId = '00000000-0000-4000-8000-000000000001';
