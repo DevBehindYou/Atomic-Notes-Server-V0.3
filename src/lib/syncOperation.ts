@@ -27,6 +27,9 @@ const mismatch = () => Object.assign(new Error('sync_request_mismatch'), { statu
 const needsRecovery = (operation: SyncOperation) =>
   operation.status === 'pending' && (operation as SyncOperation & { recoveryFormat?: unknown }).recoveryFormat !== undefined;
 const recoveryRequired = () => httpError('sync_recovery_required', 409);
+const needsLogout = (operation: SyncOperation) => operation.status === 'pending' &&
+  (operation as SyncOperation & { logoutAttemptId?: unknown }).logoutAttemptId !== undefined;
+const logoutRequired = () => httpError('sync_logout_required', 409);
 
 /**
  * Returns the recorded operation for a request ID, if any. A completed
@@ -38,6 +41,7 @@ export async function findSync(db: Db, userId: string, requestId: string, rows: 
   if (!previous) return null;
   if (previous.fingerprint !== fingerprintOf(rows, mode)) throw mismatch();
   if (needsRecovery(previous)) throw recoveryRequired();
+  if (needsLogout(previous)) throw logoutRequired();
   return previous;
 }
 
@@ -111,6 +115,7 @@ export async function settleAbandonedSyncs(db: Db, userId: string) {
   const pending = await syncOperations(db).find({ userId, status: 'pending' }).toArray();
   // Check the entire existing result before closing any legacy operation.
   if (pending.some(needsRecovery)) throw recoveryRequired();
+  if (pending.some(needsLogout)) throw logoutRequired();
   for (const operation of pending) {
     await finishSync(db, operation);
   }
