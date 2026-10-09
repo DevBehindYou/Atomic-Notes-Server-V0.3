@@ -57,10 +57,11 @@ test('opt-in logout HTTP writes, replays and completes only acknowledged notes',
   assert.deepEqual(await finance(fixture.owner), freeBefore);
   phase = 'real_free_writes_and_replay';
   const writesBefore = (await state()).writes;
-  for (const push of free.pushes) {
+  for (const [index, push] of free.pushes.entries()) {
     const delivered = await call(a, '/api/notes/push', push);
     assert.equal(delivered.status, 200); assert.equal(delivered.body.charged, 0); assert.equal(delivered.body.refunded, 0);
-    assert.equal(delivered.body.results[0].version, 1);
+    // Fresh versions use the retained per-user sequence, including across batches.
+    assert.equal(delivered.body.results[0].version, index + 1);
     const afterWrite = (await state()).writes;
     assert.deepEqual(await call(a, '/api/notes/push', push), delivered);
     assert.equal((await state()).writes, afterWrite);

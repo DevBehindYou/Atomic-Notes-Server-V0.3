@@ -9,8 +9,8 @@ import { logoutAttemptSchema, logoutBatchSchema, logoutBatchFingerprint, logoutR
   LOGOUT_BOUNDS, selectLogoutFunding, type LogoutAttempt } from './logoutContract.js';
 import { remoteNoteRowSchema } from '../types/noteWire.js';
 
-/** Inactive helpers: callers must hold the notes lock and reconcile older work.
- * No production route imports this module. Only metadata is stored here.
+/** Rollout-gated helpers: callers must hold the notes lock and reconcile older work.
+ * Routes enable these only through the explicit logout rollout gate. Metadata only.
  */
 type BoundSession = SessionDoc & { logoutAttemptId?: string; logoutAttemptRevision?: number };
 type BoundOperation = SyncOperation & { logoutAttemptId: string; logoutSessionHash: string };
