@@ -274,3 +274,11 @@ jobs:
           path: ci-logout-recovery-commit-proof.json
           if-no-files-found: ignore
           retention-days: 7
+      - name: Upload sanitized existing-note coordinator preservation proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitized-recovery-existing-edit-proof
+          path: ci-recovery-existing-edit-proof.json
+          if-no-files-found: ignore
+          retention-days: 7
