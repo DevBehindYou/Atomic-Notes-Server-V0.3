@@ -108,6 +108,29 @@ test('inactive read-only logout recovery refuses uncertain or foreign receipts w
     assert.deepEqual(await snapshot(), retiredBefore);
     await collections.sessions(db).updateOne({ _id: newHash }, { $set: { revoked: true } });
     await refuse(inspect, /logout_recovery_current_session_invalid/);
+    phase = 'paid_settled_snapshot';
+    const paidUser = fixture.batchOwner, paidAttemptId = randomUUID(), paidRequestId = randomUUID();
+    const paidOldHash = createHash('sha256').update(FIXTURE_TOKENS.batch).digest('hex');
+    const paidNewToken = 'atomic-disposable-recovery-new-batch';
+    await collections.sessions(db).insertOne({ _id: createHash('sha256').update(paidNewToken).digest('hex'),
+      userId: paidUser, createdAt: new Date(), expiresAt: new Date(Date.now() + 86400000),
+      revoked: false, userAgent: 'disposable-recovery-fixture' });
+    const paidRows = groups[0].rows.map(row => ({ ...row, id: randomUUID() }));
+    const paidBatches = [{ requestId: paidRequestId, fingerprint: logoutBatchFingerprint(paidRows),
+      rowIds: paidRows.map(row => row.id), wireBytes: Buffer.byteLength(JSON.stringify({ rows: paidRows,
+        requestId: paidRequestId, mode: 'instant', logoutAttemptId: paidAttemptId })) }];
+    assert.equal((await admitLogoutAttempt(db, paidUser, FIXTURE_TOKENS.batch, paidAttemptId, paidBatches)).funding, 'paid');
+    const paidOperation = await openLogoutBatch(db, paidUser, FIXTURE_TOKENS.batch, paidAttemptId, paidRequestId, paidRows);
+    await recordSyncResult(db, paidOperation, { id: paidRows[0].id, ok: true, version: 1, updated_at: new Date().toISOString() });
+    await settleLogoutBatch(db, paidUser, FIXTURE_TOKENS.batch, paidAttemptId, paidRequestId);
+    await collections.sessions(db).updateOne({ _id: paidOldHash }, { $set: { revoked: true } });
+    const paidBefore = await snapshot();
+    const paidInspect = () => inspectLogoutRecovery(db, paidUser, paidNewToken, paidAttemptId, paidOldHash, paidBatches);
+    assert.deepEqual((await paidInspect()).batches, [{ requestId: paidRequestId, charged: 10, refunded: 0, accepted: 1, failed: 0 }]);
+    assert.deepEqual(await snapshot(), paidBefore);
+    assert.equal((await collections.atomicUsers(db).findOne({ _id: paidUser }))!.energy, 90);
+    await syncOperations(db).updateOne({ _id: paidOperation._id }, { $set: { charged: 0 } });
+    await refuse(paidInspect, /logout_recovery_receipt_invalid/);
     const drive = await (await fetch(`${fixture.origin}/__fixture/state`)).json() as { writes: number };
     assert.equal(drive.writes, 0);
     phase = 'complete'; passed = true;

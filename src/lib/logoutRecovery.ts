@@ -80,7 +80,9 @@ export async function inspectLogoutRecovery(db: Db, user: unknown, currentToken:
         accepted: operation.results.filter(result => result.ok).length,
         failed: operation.results.filter(result => !result.ok).length };
     });
-    if (saved.state === 'completed' && !logoutReceiptsComplete(saved, previousHash, operations)) {
+    // The shared predicate evaluates eligibility BEFORE completion. Recheck its
+    // receipt rules on a local copy without changing the retained terminal state.
+    if (saved.state === 'completed' && !logoutReceiptsComplete({ ...saved, state: 'prepared' }, previousHash, operations)) {
       throw denied('logout_recovery_receipt_invalid');
     }
     return { attemptId, state: saved.state, batches: summaries };

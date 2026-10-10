@@ -25,12 +25,23 @@ The disposable fixture asserts complete wallet/ledger/session/attempt/operation/
 note snapshots are unchanged on acceptance and refusal. It covers expired and
 removed old sessions, settled partial/completed receipts, live/foreign/revoked
 auth, missing receipts, changed manifests, pending operations and invalid charges.
+Both zero-cost and actual 10-Energy settled operation receipts are inspected;
+repeated preflight must not charge or refund either.
 Receipts are seeded through actual admission/open/result/settlement helpers; no
 Drive write is used. A simulated completed receipt is not proof of a real note
 write or a recovery implementation. Fixed-code evidence is published separately.
 The generated namespace's session TTL index is removed only inside the fixture
 so explicit expiry/removal checks do not depend on the background TTL monitor.
 This is not a TTL execution or production index-transition proof.
+
+First head `ffab65fa2b95e6f6e5275546450dad8afb741bf6`, run `38027660189`,
+passed typecheck/build/audit/unit/API gates and earlier preflight phases but failed
+the completed/retired-session check. The shared completion predicate requires a
+prepared state, so applying it to a terminal snapshot always refused. The
+correction validates receipt eligibility on a local prepared-state copy while
+retaining the stored completed state. No raw logs were retrieved; the fixed-code
+phase artifact and source inspection identified the cause. This failed head is
+not merge acceptance; corrected-head CI is required.
 
 CI typecheck, unit/integration fixtures and the exact-head sanitized artifact are
 required before merge; local dependencies are currently incomplete and no new
