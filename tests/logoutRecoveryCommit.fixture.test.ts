@@ -81,14 +81,16 @@ test('settled-only recovery commit fences current auth, preserves charges and re
     assert.equal((await call(paid, paid.currentToken, { ...paid.body,
       batches: [{ ...paid.body.batches[0], fingerprint: 'b'.repeat(64) }] })).status, 409);
     assert.deepEqual(await snapshot(), before);
-    phase = 'paid_close_lost_reply_and_parallel_replay';
+    phase = 'paid_commit_reply';
     assert.deepEqual(await call(paid), { status: 200, body: paid.expected }); // Discarded/lost first reply.
+    phase = 'paid_close_preserves_business';
     const once = await snapshot(); unchangedBusiness(before, once);
     assert.equal((await sessions.findOne({ _id: paid.currentHash }))!.logoutAttemptRevision, 1);
     assert.deepEqual(once.sessions.filter(row => row._id !== paid.currentHash), before.sessions.filter(row => row._id !== paid.currentHash));
     assert.deepEqual(once.attempts.filter(row => row.attemptId !== paid.attemptId), before.attempts.filter(row => row.attemptId !== paid.attemptId));
     const closed = await logoutAttempts(db).findOne({ _id: `${fixture.owner}:${paid.attemptId}` });
     assert.equal(closed!.state, 'completed');
+    phase = 'paid_parallel_terminal_replay';
     const replies = await Promise.all([call(paid), call(paid)]);
     for (const reply of replies) assert.deepEqual(reply, { status: 200, body: paid.expected });
     assert.equal((await sessions.findOne({ _id: paid.currentHash }))!.logoutAttemptRevision, 3);

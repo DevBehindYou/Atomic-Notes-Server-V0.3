@@ -17,16 +17,12 @@ type RecoverySession = SessionDoc & { logoutAttemptId?: string; logoutAttemptRev
 /** Rollout-gated read-only preflight. A fresh authenticated
  * owner can inspect settled metadata after the previous session expired/revoked.
  * This snapshot NEVER authorizes local erasure, adoption, refund or revocation.
- * A future mutating handoff must recheck every guard under the notes lock and a
+ * Mutating recovery separately rechecks every guard under the notes lock and a
  * transactional session fence. No Drive/token refresh or wallet initializer.
  */
 export async function inspectLogoutRecovery(db: Db, user: unknown, currentToken: string,
   attempt: unknown, previousBinding: unknown, input: unknown) {
   const snapshot = await readLogoutRecoverySnapshot(db, user, currentToken, attempt, previousBinding, input);
-  return recoveryReceiptResponse(snapshot);
-}
-
-function recoveryReceiptResponse(snapshot: Awaited<ReturnType<typeof readLogoutRecoverySnapshot>>) {
   return { attemptId: snapshot.attemptId, state: snapshot.state, batches: snapshot.summaries };
 }
 
@@ -37,6 +33,10 @@ function recoveryReceiptResponse(snapshot: Awaited<ReturnType<typeof readLogoutR
 export async function readLogoutRecoveryReceipts(db: Db, user: unknown, currentToken: string,
   attempt: unknown, previousBinding: unknown, input: unknown) {
   const snapshot = await readLogoutRecoverySnapshot(db, user, currentToken, attempt, previousBinding, input);
+  return recoveryReceiptResponse(snapshot);
+}
+
+function recoveryReceiptResponse(snapshot: Awaited<ReturnType<typeof readLogoutRecoverySnapshot>>) {
   if (snapshot.receipts.some(batch => batch.results.some(result =>
     (result.version !== undefined && (!Number.isSafeInteger(result.version) || result.version < 1)) ||
     (result.seq !== undefined && (!Number.isSafeInteger(result.seq) || result.seq < 1)) ||
