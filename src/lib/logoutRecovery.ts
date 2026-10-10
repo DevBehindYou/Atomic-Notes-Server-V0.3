@@ -6,7 +6,7 @@ import { withTransaction } from '../db/mongo.js';
 import { ENERGY } from './energyPolicy.js';
 import { logoutAttempts } from './logoutAttempt.js';
 import { LOGOUT_BOUNDS, logoutAttemptSchema, logoutBatchSchema, logoutReceiptsComplete } from './logoutContract.js';
-import { syncOperations, type SyncOperation } from './syncOperation.js';
+import { syncOperations, type SyncOperation, type SyncResult } from './syncOperation.js';
 
 const denied = (code: string) => Object.assign(new Error(code), { status: 409 });
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
@@ -116,7 +116,7 @@ async function readLogoutRecoverySnapshot(db: Db, user: unknown, currentToken: s
     const receipts = batches.map(batch => {
       const operation = operations.find(row => row._id === `${userId}:${batch.requestId}`)!;
       return { requestId: batch.requestId, charged: operation.charged, refunded: operation.refunded,
-        results: operation.results.map(result => ({ id: result.id, ok: result.ok,
+        results: operation.results.map<SyncResult>(result => ({ id: result.id, ok: result.ok,
           ...(result.version === undefined ? {} : { version: result.version }),
           ...(result.seq === undefined ? {} : { seq: result.seq }),
           ...(result.unchanged === undefined ? {} : { unchanged: result.unchanged }),

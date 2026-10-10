@@ -34,7 +34,7 @@ test('dormant receipt delivery is immutable, bounded and never reconciles uncert
         body: typeof payload === 'string' ? payload : JSON.stringify(payload) });
       return { status: response.status, body: await response.json() };
     };
-    const read = (token = FIXTURE_TOKENS.b, payload: object | string = body) => call('logout-attempt/recovery-receipts', token, payload);
+    const read = (token: string = FIXTURE_TOKENS.b, payload: object | string = body) => call('logout-attempt/recovery-receipts', token, payload);
     const snapshot = async () => ({
       wallets: await collections.atomicUsers(db).find({}).sort({ _id: 1 }).toArray(),
       ledger: await collections.energyLedger(db).find({}).sort({ _id: 1 }).toArray(),
@@ -76,8 +76,9 @@ test('dormant receipt delivery is immutable, bounded and never reconciles uncert
     assert.deepEqual(await snapshot(), settled);
     phase = 'projection_and_optional_metadata';
     const original = (push.body as { results: Array<{ id: string; ok: boolean; version: number; updated_at: string; seq?: number }> }).results;
+    const annotated = [{ ...original[0], privateMarker: rows[0].body }];
     await syncOperations(db).updateOne({ _id: `${fixture.owner}:${requestId}` },
-      { $set: { results: [{ ...original[0], privateMarker: rows[0].body }] } });
+      { $set: { results: annotated } });
     const projected = await snapshot();
     assert.deepEqual(await read(), expected);
     assert.deepEqual(await snapshot(), projected);
