@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { admitLogoutAttempt, findLogoutBatch, openLogoutBatch, settleLogoutBatch,
   completeLogoutAttempt, abortLogoutAttempt } from '../lib/logoutAttempt.js';
 import { logoutBatchSchema, LOGOUT_BOUNDS } from '../lib/logoutContract.js';
-import { inspectLogoutRecovery } from '../lib/logoutRecovery.js';
+import { inspectLogoutRecovery, readLogoutRecoveryReceipts } from '../lib/logoutRecovery.js';
 import { readLogoutRecoveryBody } from '../lib/logoutRecoveryBody.js';
 import { noteContentHash } from '../lib/contentHash.js';
 import { acquireOperationLock } from '../lib/operationLock.js';
@@ -87,6 +87,17 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
       batches: z.array(logoutBatchSchema).min(1).max(LOGOUT_BOUNDS.batches) }).strict()
       .parse(await readLogoutRecoveryBody(c.req.raw));
     return c.json(await inspectLogoutRecovery(await getDb(), c.get('userId'), c.get('sessionToken'),
+      attemptId, previousSessionHash, batches));
+  });
+  // Separate whitelist of immutable receipts; inspection cannot close/adopt an
+  // attempt. This also precedes the legacy write/reconciliation middleware.
+  notesRoute.post('/logout-attempt/recovery-receipts', async c => {
+    if (!logoutSync) return c.json({ error: 'logout_sync_unavailable' }, 404);
+    const { attemptId, previousSessionHash, batches } = z.object({ attemptId: z.string().uuid(),
+      previousSessionHash: z.string().regex(/^[a-f0-9]{64}$/),
+      batches: z.array(logoutBatchSchema).min(1).max(LOGOUT_BOUNDS.batches) }).strict()
+      .parse(await readLogoutRecoveryBody(c.req.raw));
+    return c.json(await readLogoutRecoveryReceipts(await getDb(), c.get('userId'), c.get('sessionToken'),
       attemptId, previousSessionHash, batches));
   });
   notesRoute.use('*', (c, next) => runWithPerf(async () => {
