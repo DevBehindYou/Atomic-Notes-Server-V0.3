@@ -69,7 +69,7 @@ test('inactive fresh wire caller binds timestamps, persists before create, and r
       operations: await syncOperations(db).find({ userId: fixture.owner }).sort({ _id: 1 }).toArray(),
       wallet: await collections.atomicUsers(db).findOne({ _id: fixture.owner }),
       ledger: await collections.energyLedger(db).find({ userId: fixture.owner }).sort({ _id: 1 }).toArray(),
-      counter: await db.collection('sync_counters').findOne({ _id: fixture.owner }),
+      counter: await db.collection<{ _id: string; value: number }>('sync_counters').findOne({ _id: fixture.owner }),
     });
     phase = 'unsupported_owner_envelopes_and_capacity_before_allocation';
     const baseline = await snapshot();
