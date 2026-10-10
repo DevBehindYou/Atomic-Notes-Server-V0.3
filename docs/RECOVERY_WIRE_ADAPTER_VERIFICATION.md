@@ -1,0 +1,19 @@
+# Inactive fresh wire admission adapter
+
+`src/lib/recoveryWireAdapter.ts` is an exported caller helper, with no production route import, feature gate or rollout change. It composes the approved recovery schema, admission and coordinator; the generated fixture is its only caller.
+
+The trusted caller supplies an authenticated owner and its held recovery lease, plus an owner-scoped SDK/folder. The helper compares owner and lease and verifies the live fence. It does not authenticate a bearer token or resolve Google credentials. It supports only nondeleted fresh rows with base version zero (plaintext or opaque encrypted format); existing/edit/delete/logout envelopes are refused. Fresh IDs must be globally absent, including other accounts. The approved inactive recovery protocol retains its 50-row bound; the production push route's current 100-row ceiling is unchanged and is not matched by this helper. Shared 250 KB content, note-capacity, standard-window and 5/10 Energy policy remain unchanged. The helper bounds serialized input to 4 MiB before schema projection; a future HTTP caller must independently retain the existing RAW 4 MiB body limiter, including whitespace before JSON parsing. This helper does not claim transport enforcement or full production-route parity.
+
+The operation fingerprint uses schema-normalized original rows plus mode BEFORE projection, including original `created_at` and optional `updated_at`. Content hashes omit timestamps, so hash equality cannot authorize a changed envelope. AtomicFile `createdAt` is the original date in canonical UTC; immutable payload `updatedAt` is the first persisted intent's `createdAt`, reused after lease handoff. Mongo commit/receipt update times remain determined by the existing commit kernel. No note text or original wire envelope is added to the metadata-only journal.
+
+Terminal replay precedes allocation, wallet/grants, capacity and Drive use. Pending replay loads exact existing manifests then resumes with their IDs/dates, bypassing fresh pricing/allocation. Fresh capacity and global absence are checked before ID generation and again INSIDE the debit+manifest admission transaction. A change during allocation aborts all admission writes. Unused generated IDs after failed admission are allowed; allocation cannot be promised exactly once before durable admission. External creates occur only after durable operation, debit and all manifests commit.
+
+`tests/recoveryWireAdapter.fixture.test.ts` uses a generated localhost Mongo replica set and a fake SDK with real `generateIds` call shape. It checks owner mismatch, unsupported rows/logout, duplicate/row/content/outer bounds, capacity before allocation, another owner's existing ID, allocation-time capacity race rollback, interruption after the first successful create but before its reply, timestamp-only pending mismatch despite equal content hash, stale/fresh lease retries, stable IDs/canonical dates, single original debit/ordered commit, opaque payload retention, and terminal replay with an unusable Drive SDK/folder and no current Energy/capacity. Journal content absence and fixed-schema sanitized output are asserted.
+
+CI must pass the full existing workflow and all previous 27 fixed proofs, plus `sanitized-recovery-wire-adapter-proof` with exactly:
+
+```json
+{"version":1,"scope":"disposable inactive fresh wire admission and replay adapter","phase":"complete","outcome":"pass"}
+```
+
+This is an inactive caller integration proof: fake Drive, synthetic opaque payload and same-process lease restart. It does not prove real Google Drive semantics, native vault encryption, process-kill behavior, authenticated production routing, historical repair, arbitrary timestamp tampering of externally editable Drive files, deployment, or full R11/R16 closure. No production database/index/migration/cleanup or new persistent schema is introduced.

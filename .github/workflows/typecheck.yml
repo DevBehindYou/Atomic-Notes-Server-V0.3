@@ -290,3 +290,11 @@ jobs:
           path: ci-recovery-mixed-coordinator-proof.json
           if-no-files-found: ignore
           retention-days: 7
+      - name: Upload sanitized fresh wire admission adapter proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitized-recovery-wire-adapter-proof
+          path: ci-recovery-wire-adapter-proof.json
+          if-no-files-found: ignore
+          retention-days: 7
