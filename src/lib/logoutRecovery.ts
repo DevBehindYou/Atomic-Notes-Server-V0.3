@@ -13,7 +13,7 @@ const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const whole = (value: number) => Number.isSafeInteger(value) && value >= 0;
 type BoundOperation = SyncOperation & { logoutAttemptId?: string; logoutSessionHash?: string };
 
-/** Inactive read-only preflight; no route calls this helper. A fresh authenticated
+/** Rollout-gated read-only preflight. A fresh authenticated
  * owner can inspect settled metadata after the previous session expired/revoked.
  * This snapshot NEVER authorizes local erasure, adoption, refund or revocation.
  * A future mutating handoff must recheck every guard under the notes lock and a

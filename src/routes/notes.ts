@@ -6,6 +6,8 @@ import { createHash } from 'node:crypto';
 import { admitLogoutAttempt, findLogoutBatch, openLogoutBatch, settleLogoutBatch,
   completeLogoutAttempt, abortLogoutAttempt } from '../lib/logoutAttempt.js';
 import { logoutBatchSchema, LOGOUT_BOUNDS } from '../lib/logoutContract.js';
+import { inspectLogoutRecovery } from '../lib/logoutRecovery.js';
+import { readLogoutRecoveryBody } from '../lib/logoutRecoveryBody.js';
 import { noteContentHash } from '../lib/contentHash.js';
 import { acquireOperationLock } from '../lib/operationLock.js';
 import { remoteNoteRowSchema } from '../types/noteWire.js';
@@ -76,6 +78,17 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
     } finally { await release(); }
   });
   notesRoute.use('*', requireAuth);
+  // Advisory reads must precede legacy write-lock/reconciliation middleware.
+  // No abandoned operation is settled, no wallet initialized, no session touched.
+  notesRoute.post('/logout-attempt/recovery-status', async c => {
+    if (!logoutSync) return c.json({ error: 'logout_sync_unavailable' }, 404);
+    const { attemptId, previousSessionHash, batches } = z.object({ attemptId: z.string().uuid(),
+      previousSessionHash: z.string().regex(/^[a-f0-9]{64}$/),
+      batches: z.array(logoutBatchSchema).min(1).max(LOGOUT_BOUNDS.batches) }).strict()
+      .parse(await readLogoutRecoveryBody(c.req.raw));
+    return c.json(await inspectLogoutRecovery(await getDb(), c.get('userId'), c.get('sessionToken'),
+      attemptId, previousSessionHash, batches));
+  });
   notesRoute.use('*', (c, next) => runWithPerf(async () => {
     const started = performance.now();
     // Writes are serialized per user across Vercel instances. Reads take no lock: pull reads the sequence
