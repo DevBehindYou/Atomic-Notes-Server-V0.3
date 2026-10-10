@@ -21,6 +21,34 @@ type BoundOperation = SyncOperation & { logoutAttemptId?: string; logoutSessionH
  */
 export async function inspectLogoutRecovery(db: Db, user: unknown, currentToken: string,
   attempt: unknown, previousBinding: unknown, input: unknown) {
+  const snapshot = await readLogoutRecoverySnapshot(db, user, currentToken, attempt, previousBinding, input);
+  return { attemptId: snapshot.attemptId, state: snapshot.state, batches: snapshot.summaries };
+}
+
+/** Immutable acknowledgements only, under the identical read-only guards.
+ * No terminal handoff/session fence or local-erasure authority is provided.
+ * Project a whitelist: never return operation internals, token/hash or note text.
+ */
+export async function readLogoutRecoveryReceipts(db: Db, user: unknown, currentToken: string,
+  attempt: unknown, previousBinding: unknown, input: unknown) {
+  const snapshot = await readLogoutRecoverySnapshot(db, user, currentToken, attempt, previousBinding, input);
+  if (snapshot.receipts.some(batch => batch.results.some(result =>
+    (result.version !== undefined && (!Number.isSafeInteger(result.version) || result.version < 1)) ||
+    (result.seq !== undefined && (!Number.isSafeInteger(result.seq) || result.seq < 1)) ||
+    (result.unchanged !== undefined && typeof result.unchanged !== 'boolean') || (result.ok
+      ? typeof result.updated_at !== 'string' || result.updated_at.length > 40
+      : typeof result.error !== 'string' || !/^[a-z][a-z0-9_]{0,79}$/.test(result.error))))) {
+    throw denied('logout_recovery_receipt_invalid');
+  }
+  const response = { attemptId: snapshot.attemptId, state: snapshot.state, batches: snapshot.receipts };
+  if (Buffer.byteLength(JSON.stringify(response), 'utf8') > 128 * 1024) {
+    throw denied('logout_recovery_receipt_invalid');
+  }
+  return response;
+}
+
+async function readLogoutRecoverySnapshot(db: Db, user: unknown, currentToken: string,
+  attempt: unknown, previousBinding: unknown, input: unknown) {
   const userId = z.string().uuid().parse(user), attemptId = z.string().uuid().parse(attempt);
   const previousHash = digest.parse(previousBinding);
   const batches = z.array(logoutBatchSchema).min(1).max(LOGOUT_BOUNDS.batches).parse(input);
@@ -85,6 +113,15 @@ export async function inspectLogoutRecovery(db: Db, user: unknown, currentToken:
     if (saved.state === 'completed' && !logoutReceiptsComplete({ ...saved, state: 'prepared' }, previousHash, operations)) {
       throw denied('logout_recovery_receipt_invalid');
     }
-    return { attemptId, state: saved.state, batches: summaries };
+    const receipts = batches.map(batch => {
+      const operation = operations.find(row => row._id === `${userId}:${batch.requestId}`)!;
+      return { requestId: batch.requestId, charged: operation.charged, refunded: operation.refunded,
+        results: operation.results.map(result => ({ id: result.id, ok: result.ok,
+          ...(result.version === undefined ? {} : { version: result.version }),
+          ...(result.seq === undefined ? {} : { seq: result.seq }),
+          ...(result.unchanged === undefined ? {} : { unchanged: result.unchanged }),
+          ...(result.ok ? { updated_at: result.updated_at! } : { error: result.error! }) })) };
+    });
+    return { attemptId, state: saved.state, summaries, receipts };
   });
 }
