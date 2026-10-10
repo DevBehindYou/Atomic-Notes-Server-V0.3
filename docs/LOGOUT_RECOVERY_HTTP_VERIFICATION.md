@@ -29,6 +29,13 @@ pending-operation refusal without legacy settlement and settled/terminal reads.
 Receipts are synthetic admission/result/settlement records; Drive writes remain
 zero. No actual cloud-content recovery, reauthentication or handoff is proved.
 
+First head `da838a93ed823c5462463310f39459027c11d397`, run `38028483010`,
+failed typecheck and receives no merge acceptance. Source inspection shows this
+project uses Node types with ES2022 and no DOM library; the correction explicitly
+imports Node's reader/stream types and infers the body type from Request, avoiding
+DOM-specific type names. This cause is inferred from source, not a retrieved
+compiler log; corrected-head CI must verify it. No raw logs were fetched.
+
 Exact-head CI and all named sanitized artifacts are required before merge;
 local caches remain incomplete. No production flag, migration/index, deployment,
 signing or device operation is authorized by these tests. #64's no-caller statement

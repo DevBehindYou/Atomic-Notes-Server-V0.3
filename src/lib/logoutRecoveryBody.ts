@@ -1,4 +1,5 @@
 import { HTTPException } from 'hono/http-exception';
+import type { ReadableStreamDefaultReader } from 'node:stream/web';
 
 // Five manifests of fifty UUIDs fit well below this bound. Count raw UTF-8
 // bytes, including whitespace; do not trust Content-Length or allocate a body

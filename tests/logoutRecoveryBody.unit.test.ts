@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { ReadableStream } from 'node:stream/web';
 import { HTTPException } from 'hono/http-exception';
 import { readLogoutRecoveryBody, LOGOUT_RECOVERY_BODY_BYTES } from '../src/lib/logoutRecoveryBody.js';
 
-const request = (body?: BodyInit) => new Request('http://localhost/fixture', { method: 'POST', body });
+type RequestBody = NonNullable<ConstructorParameters<typeof Request>[1]>['body'];
+const request = (body?: RequestBody) => new Request('http://localhost/fixture', { method: 'POST', body });
 const refused = async (operation: Promise<unknown>, status: number, code: string) => {
   try { await operation; assert.fail('Expected bounded body refusal'); }
   catch (error) {
@@ -29,8 +31,9 @@ test('oversized stream is canceled even with a false Content-Length', async () =
     pull(controller) { pulls++; controller.enqueue(new Uint8Array(LOGOUT_RECOVERY_BODY_BYTES + 1)); },
     cancel() { canceled++; },
   });
-  const r = new Request('http://localhost/fixture', { method: 'POST', body: stream,
-    headers: { 'content-length': '0' }, duplex: 'half' } as RequestInit & { duplex: 'half' });
+  const init = { method: 'POST', body: stream,
+    headers: { 'content-length': '0' }, duplex: 'half' as const };
+  const r = new Request('http://localhost/fixture', init);
   await refused(readLogoutRecoveryBody(r), 413, 'logout_recovery_payload_too_large');
   assert.equal(canceled, 1); assert.ok(pulls <= 2);
 });
@@ -45,7 +48,7 @@ test('read errors do not expose the stream failure', async () => {
   const stream = new ReadableStream<Uint8Array>({ start(controller) {
     controller.error(new Error('Public synthetic stream failure'));
   } });
-  const r = new Request('http://localhost/fixture', { method: 'POST', body: stream, duplex: 'half' }
-    as RequestInit & { duplex: 'half' });
+  const init = { method: 'POST', body: stream, duplex: 'half' as const };
+  const r = new Request('http://localhost/fixture', init);
   await refused(readLogoutRecoveryBody(r), 400, 'invalid_json');
 });
