@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import type { Db } from 'mongodb';
+import type { ClientSession, Db } from 'mongodb';
 import { z } from 'zod';
-import { collections } from '../db/collections.js';
+import { collections, type SessionDoc } from '../db/collections.js';
 import { withTransaction } from '../db/mongo.js';
 import { ENERGY } from './energyPolicy.js';
 import { logoutAttempts } from './logoutAttempt.js';
@@ -12,6 +12,7 @@ const denied = (code: string) => Object.assign(new Error(code), { status: 409 })
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const whole = (value: number) => Number.isSafeInteger(value) && value >= 0;
 type BoundOperation = SyncOperation & { logoutAttemptId?: string; logoutSessionHash?: string };
+type RecoverySession = SessionDoc & { logoutAttemptId?: string; logoutAttemptRevision?: number };
 
 /** Rollout-gated read-only preflight. A fresh authenticated
  * owner can inspect settled metadata after the previous session expired/revoked.
@@ -22,6 +23,10 @@ type BoundOperation = SyncOperation & { logoutAttemptId?: string; logoutSessionH
 export async function inspectLogoutRecovery(db: Db, user: unknown, currentToken: string,
   attempt: unknown, previousBinding: unknown, input: unknown) {
   const snapshot = await readLogoutRecoverySnapshot(db, user, currentToken, attempt, previousBinding, input);
+  return recoveryReceiptResponse(snapshot);
+}
+
+function recoveryReceiptResponse(snapshot: Awaited<ReturnType<typeof readLogoutRecoverySnapshot>>) {
   return { attemptId: snapshot.attemptId, state: snapshot.state, batches: snapshot.summaries };
 }
 
@@ -49,6 +54,12 @@ export async function readLogoutRecoveryReceipts(db: Db, user: unknown, currentT
 
 async function readLogoutRecoverySnapshot(db: Db, user: unknown, currentToken: string,
   attempt: unknown, previousBinding: unknown, input: unknown) {
+  return withTransaction(session => readLogoutRecoveryInSession(db, user, currentToken,
+    attempt, previousBinding, input, session));
+}
+
+async function readLogoutRecoveryInSession(db: Db, user: unknown, currentToken: string,
+  attempt: unknown, previousBinding: unknown, input: unknown, session: ClientSession) {
   const userId = z.string().uuid().parse(user), attemptId = z.string().uuid().parse(attempt);
   const previousHash = digest.parse(previousBinding);
   const batches = z.array(logoutBatchSchema).min(1).max(LOGOUT_BOUNDS.batches).parse(input);
@@ -56,7 +67,6 @@ async function readLogoutRecoverySnapshot(db: Db, user: unknown, currentToken: s
   const currentHash = createHash('sha256').update(currentToken).digest('hex');
   if (currentHash === previousHash) throw denied('logout_recovery_same_session');
   const id = `${userId}:${attemptId}`;
-  return withTransaction(async session => {
     const now = new Date();
     const current = await collections.sessions(db).findOne({ _id: currentHash, userId,
       revoked: false, expiresAt: { $gt: now } }, { session });
@@ -122,6 +132,46 @@ async function readLogoutRecoverySnapshot(db: Db, user: unknown, currentToken: s
           ...(result.unchanged === undefined ? {} : { unchanged: result.unchanged }),
           ...(result.ok ? { updated_at: result.updated_at! } : { error: result.error! }) })) };
     });
-    return { attemptId, state: saved.state, summaries, receipts };
+    return { attemptId, state: saved.state, summaries, receipts, current: current as RecoverySession,
+      currentHash, saved };
+}
+
+/** Caller must hold the notes lock. This narrow recovery closes only a fully
+ * settled previous plan. It never adopts/replays a batch or revokes either
+ * session. The current-session increment is an actual transactional auth fence.
+ * Missing/pending receipts remain blocked, including on terminal replay.
+ */
+export async function commitLogoutRecovery(db: Db, user: unknown, currentToken: string,
+  attempt: unknown, previousBinding: unknown, input: unknown,
+  hooks: { beforeWrites?: () => Promise<void>; afterWrites?: () => Promise<void> } = {}) {
+  return withTransaction(async session => {
+    const snapshot = await readLogoutRecoveryInSession(db, user, currentToken, attempt,
+      previousBinding, input, session);
+    // Validate the exact outbound whitelist before any state transition.
+    const response = recoveryReceiptResponse(snapshot);
+    const revision = snapshot.current.logoutAttemptRevision ?? 0;
+    if (!Number.isSafeInteger(revision) || revision < 0 || revision >= Number.MAX_SAFE_INTEGER) {
+      throw denied('logout_revision_exhausted');
+    }
+    await hooks.beforeWrites?.();
+    const fenced = await collections.sessions(db).updateOne({ _id: snapshot.currentHash,
+      userId: snapshot.saved.userId, revoked: false, expiresAt: { $gt: new Date() },
+      logoutAttemptId: { $exists: false },
+      ...(snapshot.current.logoutAttemptRevision === undefined
+        ? { logoutAttemptRevision: { $exists: false } } : { logoutAttemptRevision: revision }) },
+    { $inc: { logoutAttemptRevision: 1 } }, { session });
+    if (fenced.matchedCount !== 1) throw denied('logout_session_changed');
+    const terminal = snapshot.state === 'prepared'
+      ? snapshot.summaries.every(batch => batch.failed === 0) ? 'completed' as const : 'aborted' as const
+      : snapshot.state;
+    if (snapshot.state === 'prepared') {
+      const closed = await logoutAttempts(db).updateOne({ _id: snapshot.saved._id,
+        userId: snapshot.saved.userId, sessionHash: snapshot.saved.sessionHash,
+        state: 'prepared', updatedAt: snapshot.saved.updatedAt },
+      { $set: { state: terminal, updatedAt: new Date() } }, { session });
+      if (closed.matchedCount !== 1) throw denied('logout_recovery_attempt_changed');
+    }
+    await hooks.afterWrites?.();
+    return { ...response, state: terminal };
   });
 }
