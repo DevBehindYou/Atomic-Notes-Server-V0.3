@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { admitLogoutAttempt, findLogoutBatch, openLogoutBatch, settleLogoutBatch,
   completeLogoutAttempt, abortLogoutAttempt } from '../lib/logoutAttempt.js';
 import { logoutBatchSchema, LOGOUT_BOUNDS } from '../lib/logoutContract.js';
-import { inspectLogoutRecovery, readLogoutRecoveryReceipts } from '../lib/logoutRecovery.js';
+import { inspectLogoutRecovery, readLogoutRecoveryReceipts, commitLogoutRecovery } from '../lib/logoutRecovery.js';
 import { readLogoutRecoveryBody } from '../lib/logoutRecoveryBody.js';
 import { noteContentHash } from '../lib/contentHash.js';
 import { acquireOperationLock } from '../lib/operationLock.js';
@@ -99,6 +99,21 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
       .parse(await readLogoutRecoveryBody(c.req.raw));
     return c.json(await readLogoutRecoveryReceipts(await getDb(), c.get('userId'), c.get('sessionToken'),
       attemptId, previousSessionHash, batches));
+  });
+  // Deliberately before legacy reconciliation: missing/pending receipts must
+  // refuse recovery rather than settle/refund abandoned work as a side effect.
+  notesRoute.post('/logout-attempt/recovery-commit', async c => {
+    if (!logoutSync) return c.json({ error: 'logout_sync_unavailable' }, 404);
+    const { attemptId, previousSessionHash, batches } = z.object({ attemptId: z.string().uuid(),
+      previousSessionHash: z.string().regex(/^[a-f0-9]{64}$/),
+      batches: z.array(logoutBatchSchema).min(1).max(LOGOUT_BOUNDS.batches) }).strict()
+      .parse(await readLogoutRecoveryBody(c.req.raw));
+    const db = await getDb();
+    const release = await acquireOperationLock(db, `notes:${c.get('userId')}`, 15000);
+    try {
+      return c.json(await commitLogoutRecovery(db, c.get('userId'), c.get('sessionToken'),
+        attemptId, previousSessionHash, batches));
+    } finally { await release(); }
   });
   notesRoute.use('*', (c, next) => runWithPerf(async () => {
     const started = performance.now();
