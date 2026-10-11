@@ -8,7 +8,7 @@ import { migrateAtomicFile } from '../types/atomicFile.js';
 import { NOTE_LIMIT } from './energy.js';
 import { noteContentHash } from './contentHash.js';
 import { fingerprintOf, syncOperations } from './syncOperation.js';
-import { generateNoteFileIdsWith } from './driveGeneration.js';
+import { generateNoteFileIdsWith, readNoteGenerationWith } from './driveGeneration.js';
 import { withRecoveryFence, type RecoveryLease } from './recoveryGate.js';
 import { beginRecoverySync } from './recoveryAdmission.js';
 import { assertRecoveryCoverage, classifiedResultSchema } from './recoveryCoverage.js';
@@ -85,6 +85,25 @@ export async function runClassifiedRecoveryPush(db: Db, authenticatedOwner: stri
     });
   } else {
     const frozen = await withRecoveryFence(db, lease, classify);
+    // Metadata equality is only a hint. Read outside Mongo's transaction, then
+    // revalidate the complete frozen preimage during atomic admission below.
+    // This branch alone admits new requests: saved pending/terminal decisions
+    // never reread external content or become a new classification on replay.
+    for (const result of frozen.results) {
+      if (!result.ok) continue;
+      const index = rows.findIndex(row => row.id === result.id);
+      const existing = frozen.preimages[index]!, row = rows[index];
+      if (existing.generationFormat !== 1) throw refuse('recovery_unchanged_legacy_unsupported');
+      if (!existing.driveFileId || existing.kind !== row.kind || existing.encV !== row.enc_v ||
+          existing.pinned !== row.pinned) throw refuse('recovery_unchanged_metadata_mismatch');
+      const content = await readNoteGenerationWith(drive, existing.driveFileId, parentId);
+      const contentHash = noteContentHash({ ...content, enc_v: content.encV });
+      if (content.id !== row.id || content.kind !== existing.kind || content.encV !== existing.encV ||
+          content.pinned !== existing.pinned || contentHash !== existing.contentHash ||
+          contentHash !== noteContentHash(row)) {
+        throw refuse('recovery_unchanged_content_mismatch');
+      }
+    }
     const writes = rows.filter(row => !frozen.results.some(result => result.id === row.id));
     const ids = writes.length ? await generateNoteFileIdsWith(drive, writes.length) : [], now = new Date();
     intents = writes.map((row, i) => {
