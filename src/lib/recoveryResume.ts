@@ -9,6 +9,7 @@ import { stageRecoveryIntent } from './recoveryIntent.js';
 import { commitRecoveryIntents } from './recoveryCommit.js';
 import { finishRecoverySync } from './recoverySettlement.js';
 import type { SyncOperation } from './syncOperation.js';
+import { mapConcurrent } from './concurrency.js';
 
 export type RecoveryResumeResult =
   | { status: 'needs_client_content'; noteIds: string[] }
@@ -57,9 +58,11 @@ export async function resumeRecoveryOperation(db: Db, lease: RecoveryLease,
     }
   }
   if (needed.length) return { status: 'needs_client_content', noteIds: needed };
-  for (const row of prepared) {
-    await stageRecoveryIntent(db, lease, row._id, drive, parentId, content.get(row.noteId));
-  }
+  // Each intent owns separate fenced transactions; the shared metadata commit
+  // below stays sequential. Drain all started stages before any error escapes,
+  // so a failed request never leaves orphan asynchronous staging work.
+  await mapConcurrent(prepared, 8, (row) =>
+    stageRecoveryIntent(db, lease, row._id, drive, parentId, content.get(row.noteId)));
   const ready = rows.filter((row) => row.state === 'prepared' || row.state === 'verified');
   if (ready.length) await commitRecoveryIntents(db, lease, ready.map((row) => row._id), drive, parentId);
   return { status: 'complete', operation: await finishRecoverySync(db, lease, operationId) };
