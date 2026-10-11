@@ -78,12 +78,21 @@ test('new unchanged admissions read committed generations without rereading froz
       allocations, creates, writes });
     const plain = row(), encrypted = row(true), deleted = row();
     phase = 'seed_through_real_inactive_callers';
-    await runFreshRecoveryPush(db, fixture.owner, lease, make([plain, encrypted, deleted]), sdk, 'synthetic-parent');
-    await call(make([{ ...deleted, deleted: true, base_version: 1 }]));
+    const seeded = await runFreshRecoveryPush(db, fixture.owner, lease, make([plain, encrypted, deleted]), sdk, 'synthetic-parent');
+    assert.equal(seeded.status, 'complete');
+    const seededEncrypted = await collections.notes(db).findOne({ _id: encrypted.id });
+    const seededDeleted = await collections.notes(db).findOne({ _id: deleted.id });
+    assert.ok(seededEncrypted && seededDeleted);
+    const tombstone = await call(make([{ ...deleted, deleted: true, base_version: seededDeleted.localVersion }]));
+    assert.equal(tombstone.status, 'complete');
+    if (tombstone.status !== 'complete') throw new Error('synthetic_expected_tombstone');
+    assert.equal(tombstone.operation.results[0].ok, true); assert.notEqual(tombstone.operation.results[0].unchanged, true);
+    const committedDeleted = await collections.notes(db).findOne({ _id: deleted.id });
+    assert.ok(committedDeleted?.deleted); assert.equal(committedDeleted.localVersion, seededDeleted.localVersion + 1);
     const note = await collections.notes(db).findOne({ _id: plain.id }); assert.ok(note?.driveFileId);
     const pointer = note.driveFileId, original = structuredClone(files.get(pointer)!);
-    const samePlain = { ...plain, base_version: 1 }, sameEncrypted = { ...encrypted, base_version: 1 };
-    const sameDeleted = { ...deleted, deleted: true, base_version: 2 };
+    const samePlain = { ...plain, base_version: note.localVersion }, sameEncrypted = { ...encrypted, base_version: seededEncrypted.localVersion };
+    const sameDeleted = { ...deleted, deleted: true, base_version: committedDeleted.localVersion };
     phase = 'metadata_only_live_route_false_unchanged_control';
     // Current mutable route is a control, never changed by this inactive helper.
     files.set(pointer, { ...original, body: 'Public injected corrupt body' });
