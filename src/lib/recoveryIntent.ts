@@ -7,6 +7,7 @@ import type { SyncOperation } from './syncOperation.js';
 import { noteContentHash } from './contentHash.js';
 import { createNoteGenerationWith } from './driveGeneration.js';
 import { withRecoveryFence, type RecoveryLease } from './recoveryGate.js';
+import { assertRecoveryCoverage } from './recoveryCoverage.js';
 
 /** Inactive journal preparation/staging only. No production caller imports it. */
 type RecoveryOperation = SyncOperation & { recoveryFormat: 1 };
@@ -50,7 +51,9 @@ export async function prepareRecoveryIntentsInSession(db: Db, lease: RecoveryLea
   if (rows.some((row) => row.userId !== lease.userId || row.wipeEpoch !== lease.wipeEpoch ||
       row.leaseToken !== lease.token || row.state !== 'prepared')) throw new Error('recovery_prepare_identity_invalid');
   const operation = await pendingOperation(db, rows[0], session);
-  if (JSON.stringify(operation.rowIds) !== JSON.stringify(rows.map((row) => row.noteId))) throw new Error('recovery_operation_rows_mismatch');
+  assertRecoveryCoverage(operation, rows);
+  const unresolved = operation.rowIds.filter(id => !operation.results.some(result => result.id === id));
+  if (JSON.stringify(unresolved) !== JSON.stringify(rows.map((row) => row.noteId))) throw new Error('recovery_operation_rows_mismatch');
   const result: NoteWriteIntent[] = [];
   for (const row of rows) {
     if (operation.results.some((stored) => stored.id === row.noteId)) throw new Error('recovery_row_already_settled');

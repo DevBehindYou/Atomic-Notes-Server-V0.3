@@ -4,6 +4,7 @@ import { noteWriteIntentSchema, type NoteWriteIntent } from '../db/recoveryContr
 import { assertRecoveryPreimageInSession } from './recoveryIntent.js';
 import { withRecoveryFence, type RecoveryLease } from './recoveryGate.js';
 import type { SyncOperation } from './syncOperation.js';
+import { assertRecoveryCoverage } from './recoveryCoverage.js';
 
 /** Inactive same-epoch generation recovery, including delete/restore targets.
  * Never recreates an operation or file; deletion only changes Mongo metadata.
@@ -21,13 +22,12 @@ export async function adoptRecoveryOperation(db: Db, lease: RecoveryLease, input
     const journal = db.collection<NoteWriteIntent>('note_write_intents');
     const found = (await journal.find({ operationId, userId: lease.userId }, { session }).limit(51).toArray())
       .map((row) => noteWriteIntentSchema.parse(row));
-    if (found.length !== operation.rowIds.length || new Set(found.map((row) => row.noteId)).size !== found.length) {
-      throw new Error('recovery_adoption_manifest_invalid');
-    }
+    assertRecoveryCoverage(operation, found);
     const rows: NoteWriteIntent[] = [];
     for (const id of operation.rowIds) {
       const row = found.find((candidate) => candidate.noteId === id);
-      if (!row || row.fingerprint !== operation.fingerprint || row.wipeEpoch !== lease.wipeEpoch) {
+      if (!row) continue; // Coverage proves an immutable classified result.
+      if (row.fingerprint !== operation.fingerprint || row.wipeEpoch !== lease.wipeEpoch) {
         throw new Error('recovery_adoption_manifest_invalid');
       }
       const result = operation.results.find((candidate) => candidate.id === id);
