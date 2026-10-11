@@ -176,7 +176,7 @@ test('inactive recovery bounds eight stages and drains failures before saved-ID 
     assert.deepEqual((await journal.find({ operationId: secondId }).sort({ _id: 1 }).toArray()).map(row => row.stagedFileId), savedIds);
     assert.deepEqual(await economic(), savedEconomy);
 
-    phase = 'terminal_replay_and_actual_http_pull';
+    phase = 'terminal_replay';
     const noSdk = { files: {
       async generateIds() { throw new Error('terminal_must_not_allocate'); },
       async create() { throw new Error('terminal_must_not_create'); },
@@ -186,11 +186,19 @@ test('inactive recovery bounds eight stages and drains failures before saved-ID 
     assert.deepEqual(await economic(), savedEconomy);
     await releaseRecoveryLease(db, lease);
     const auth = { authorization: `Bearer ${FIXTURE_TOKENS.a}` };
+    phase = 'actual_http_paginated_pull';
     const response = await fetch(`${fixture.origin}/api/notes/pull?after=0`, { headers: auth });
     assert.equal(response.status, 200);
-    const page = await response.json() as { nextCursor: number; rows: { id: string; body: string }[] };
-    assert.equal(page.nextCursor, 20); assert.equal(page.rows.length, 20);
-    for (const row of [...first.rows, ...second.rows]) assert.equal(page.rows.find(remote => remote.id === row.id)!.body, row.body);
+    const page = await response.json() as { nextCursor: number; hasMore: boolean; rows: { id: string; body: string }[] };
+    assert.equal(page.nextCursor, 10); assert.equal(page.hasMore, true); assert.equal(page.rows.length, 10);
+    const nextResponse = await fetch(`${fixture.origin}/api/notes/pull?after=${page.nextCursor}`, { headers: auth });
+    assert.equal(nextResponse.status, 200);
+    const nextPage = await nextResponse.json() as typeof page;
+    assert.equal(nextPage.nextCursor, 20); assert.equal(nextPage.hasMore, false); assert.equal(nextPage.rows.length, 10);
+    const pulled = [...page.rows, ...nextPage.rows];
+    assert.equal(new Set(pulled.map(row => row.id)).size, 20);
+    for (const row of [...first.rows, ...second.rows]) assert.equal(pulled.find(remote => remote.id === row.id)!.body, row.body);
+    phase = 'actual_http_push_replay';
     const replay = await fetch(`${fixture.origin}/api/notes/push`, { method: 'POST',
       headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify(second) });
     assert.equal(replay.status, 200);
