@@ -103,9 +103,14 @@ test('inactive fresh wire caller binds timestamps, persists before create, and r
     await collections.atomicUsers(db).updateOne({ _id: fixture.owner }, { $set: { noteLimit: 30 } });
     phase = 'durable_admission_before_interrupted_external_create';
     await assert.rejects(call(), /synthetic_external_create_reply_lost/);
-    const paid = await snapshot(); assert.equal(allocations, 2); assert.equal(creates, 1); assert.equal(writes, 1);
+    // Both stages were already started. The coordinator drains the successful
+    // sibling before rejecting; its verified generation remains unpublished.
+    const paid = await snapshot(); assert.equal(allocations, 2); assert.equal(creates, 2); assert.equal(writes, 2);
     assert.equal(paid.wallet!.energy, 90); assert.equal(paid.ledger.length, baseline.ledger.length + 1);
     assert.equal(paid.notes.length, 0); assert.equal(paid.intents.length, 2); assert.equal(paid.operations[0].status, 'pending');
+    assert.deepEqual(paid.operations[0].results, []);
+    assert.equal(paid.intents.filter(intent => intent.state === 'prepared').length, 1);
+    assert.equal(paid.intents.filter(intent => intent.state === 'verified').length, 1);
     const savedIds = rows.map(row => paid.intents.find(intent => intent.noteId === row.id)!.stagedFileId!);
     const persistedTimes = rows.map(row => paid.intents.find(intent => intent.noteId === row.id)!.createdAt);
     phase = 'timestamp_only_pending_mismatch_before_allocation';
@@ -114,7 +119,7 @@ test('inactive fresh wire caller binds timestamps, persists before create, and r
       assert.equal(noteContentHash(changed), noteContentHash(rows[0]));
       await assert.rejects(call({ ...envelope, rows: [changed, rows[1]] }), /sync_request_mismatch/);
     }
-    assert.deepEqual(await snapshot(), paid); assert.equal(allocations, 2); assert.equal(creates, 1);
+    assert.deepEqual(await snapshot(), paid); assert.equal(allocations, 2); assert.equal(creates, 2);
     phase = 'fresh_lease_same_envelope_stable_ids_and_timestamps';
     const oldLease = lease; await releaseRecoveryLease(db, lease); lease = await acquireRecoveryLease(db, fixture.owner);
     await assert.rejects(runFreshRecoveryPush(db, fixture.owner, oldLease, envelope, sdk, 'synthetic-parent'), /recovery_fence_lost/);
