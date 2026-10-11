@@ -76,6 +76,9 @@ test('metadata and media retry separately while retaining exact file identity', 
 
 test('four-attempt ceiling and existing backoff are retained, final and opaque errors are not retried', async () => {
   const permanent = { response: { status: 503 } }; let calls = 0; const timer = clock();
+  // Unknown runtime options cannot change the production policy through this
+  // sleep-only inactive test seam, even if a JavaScript caller adds properties.
+  Object.assign(timer.options, { attempts: 1, baseMs: 1 });
   const sdk = { files: { async create() { calls++; throw permanent; } } } as unknown as drive_v3.Drive;
   await assert.rejects(createNoteGenerationWith(sdk, fileId, parent, content, timer.options), seen => seen === permanent);
   assert.equal(calls, 4); assert.equal(timer.waits.length, 3);

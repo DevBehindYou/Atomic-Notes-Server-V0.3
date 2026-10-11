@@ -13,7 +13,7 @@ export type GenerationRetryOptions = { sleep?: (ms: number) => Promise<void> };
 export async function generateNoteFileIdsWith(drive: drive_v3.Drive, count: number,
   retry: GenerationRetryOptions = {}): Promise<string[]> {
   if (!Number.isInteger(count) || count < 1 || count > 1000) throw new Error('generation_count_invalid');
-  const { data } = await withDriveRetry(() => drive.files.generateIds({ count, space: 'drive', type: 'files', fields: 'ids' }), retry);
+  const { data } = await withDriveRetry(() => drive.files.generateIds({ count, space: 'drive', type: 'files', fields: 'ids' }), { sleep: retry.sleep });
   const ids = data.ids;
   if (!Array.isArray(ids) || ids.length !== count || ids.some((id) => typeof id !== 'string' || !id) ||
       new Set(ids).size !== count) throw new Error('generation_ids_invalid');
@@ -44,7 +44,7 @@ export async function createNoteGenerationWith(drive: drive_v3.Drive, fileId: st
       requestBody: { id: fileId, name: `${expected.id}.${fileId}.atomic`, parents: [parentId], mimeType: 'application/json' },
       // Every SDK retry receives its own stream with identical retained content.
       media: { mimeType: 'application/json', body: Readable.from(serialized) }, fields: 'id',
-    }), retry);
+    }), { sleep: retry.sleep });
     if (created.data.id !== fileId) throw new Error('generation_identity_mismatch');
   } catch (error) {
     const e = error as { code?: number | string; status?: number | string; response?: { status?: number | string } } | null;
@@ -60,9 +60,9 @@ export async function createNoteGenerationWith(drive: drive_v3.Drive, fileId: st
 export async function readNoteGenerationWith(drive: drive_v3.Drive, fileId: string, parentId: string,
   retry: GenerationRetryOptions = {}): Promise<AtomicFileV1> {
   if (!fileId || !parentId) throw new Error('generation_identity_invalid');
-  const metadata = (await withDriveRetry(() => drive.files.get({ fileId, fields: 'id,parents,mimeType,trashed' }), retry)).data;
+  const metadata = (await withDriveRetry(() => drive.files.get({ fileId, fields: 'id,parents,mimeType,trashed' }), { sleep: retry.sleep })).data;
   if (metadata.id !== fileId || metadata.trashed || metadata.mimeType !== 'application/json' ||
       !metadata.parents?.includes(parentId)) throw new Error('generation_identity_mismatch');
-  const raw = (await withDriveRetry(() => drive.files.get({ fileId, alt: 'media' }, { responseType: 'json' }), retry)).data;
+  const raw = (await withDriveRetry(() => drive.files.get({ fileId, alt: 'media' }, { responseType: 'json' }), { sleep: retry.sleep })).data;
   return checkedContent(raw);
 }
