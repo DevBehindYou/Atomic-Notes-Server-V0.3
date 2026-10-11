@@ -72,7 +72,7 @@ test('inactive recovery bounds eight stages and drains failures before saved-ID 
             if (holds.size === 8) eight.resolve();
             await gate.promise;
           }
-          if (id === failId) { fault.resolve(); throw { code: 503 }; }
+          if (id === failId) { fault.resolve(); throw { code: 'ECONNRESET' }; }
           if (files.has(id)) throw { code: 409 };
           let raw = ''; for await (const part of params.media.body) raw += String(part);
           files.set(id, migrateAtomicFile(JSON.parse(raw)));
@@ -149,7 +149,7 @@ test('inactive recovery bounds eight stages and drains failures before saved-ID 
     drain();
     const failed = await secondRun;
     if (!('error' in failed)) throw new Error('synthetic_expected_stage_failure');
-    assert.equal((failed.error as { code?: number }).code, 503);
+    assert.equal((failed.error as { code?: string }).code, 'ECONNRESET');
     assert.equal(active, 0); assert.equal(peak, 8); assert.equal(started.length, 8);
     assert.deepEqual(await notes(), oldNotes); assert.deepEqual(await counter(), oldCounter);
     const pending = await syncOperations(db).findOne({ _id: secondId });
