@@ -45,8 +45,15 @@ test('inactive recovery bounds eight stages and drains failures before saved-ID 
     let holds = new Map<string, ReturnType<typeof deferred>>(), eight = deferred();
     let failId: string | undefined, fault = deferred(), holdCreates = true;
     const started: string[] = [];
+    const ownedRuns: Promise<unknown>[] = [];
     const drain = () => { holdCreates = false; for (const gate of holds.values()) gate.resolve(); };
-    t.after(async () => { drain(); try { await releaseRecoveryLease(db, lease); } finally { await fixture.close(); } });
+    t.after(async () => {
+      drain();
+      // Owned coordinator futures immediately consume rejection and must drain
+      // before closing their lease/database, including assertion-failure paths.
+      await Promise.all(ownedRuns);
+      try { await releaseRecoveryLease(db, lease); } finally { await fixture.close(); }
+    });
     await collections.googleAccounts(db).updateOne({ userId: fixture.owner }, { $set: { driveRootFolderId: parent } });
     const call = async <T>(fn: () => Promise<T>): Promise<T> => {
       calls++; active++; peak = Math.max(peak, active);
@@ -96,9 +103,13 @@ test('inactive recovery bounds eight stages and drains failures before saved-ID 
     phase = 'eight_stage_ceiling';
     const first = make(), firstId = `${fixture.owner}:${first.requestId}`;
     const firstRun = runClassifiedRecoveryPush(db, fixture.owner, lease, first, sdk, parent)
-      .then(result => { settled = true; return result; }, error => { settled = true; throw error; });
+      .then(result => { settled = true; return { result }; }, error => { settled = true; return { error }; });
+    ownedRuns.push(firstRun);
     // Observe actual started SDK calls, rather than elapsed-time assumptions.
-    await eight.promise;
+    await Promise.race([eight.promise, firstRun.then(finished => {
+      if ('error' in finished) throw finished.error;
+      throw new Error('synthetic_expected_parked_stages');
+    })]);
     assert.equal(active, 8); assert.equal(peak, 8); assert.equal(started.length, 8); assert.equal(settled, false);
     assert.equal((await notes()).length, 0); assert.equal(await counter(), null);
     const firstPending = await syncOperations(db).findOne({ _id: firstId });
@@ -106,7 +117,9 @@ test('inactive recovery bounds eight stages and drains failures before saved-ID 
     assert.equal((await economic()).wallet!.energy, 90);
     assert.equal(await journal.countDocuments({ operationId: firstId, state: 'prepared' }), 10);
     drain();
-    const firstComplete = await firstRun;
+    const firstFinished = await firstRun;
+    if ('error' in firstFinished) throw firstFinished.error;
+    const firstComplete = firstFinished.result;
     assert.equal(firstComplete.status, 'complete');
     if (firstComplete.status !== 'complete') throw new Error('synthetic_expected_complete');
     assert.deepEqual(firstComplete.operation.results.map(row => row.id), first.rows.map(row => row.id));
@@ -121,7 +134,11 @@ test('inactive recovery bounds eight stages and drains failures before saved-ID 
     const oldNotes = await notes(), oldCounter = await counter();
     const secondRun = runClassifiedRecoveryPush(db, fixture.owner, lease, second, sdk, parent)
       .then(result => { settled = true; return { result }; }, error => { settled = true; return { error }; });
-    await eight.promise;
+    ownedRuns.push(secondRun);
+    await Promise.race([eight.promise, secondRun.then(finished => {
+      if ('error' in finished) throw finished.error;
+      throw new Error('synthetic_expected_parked_stages');
+    })]);
     failId = started[0]; holds.get(failId)!.resolve();
     await fault.promise;
     // Drain already queued continuations without a timing-dependent sleep.
