@@ -143,11 +143,15 @@ test('new unchanged admissions read committed generations without rereading froz
     await collections.notes(db).updateOne({ _id: plain.id }, { $set: { driveFileId: pointer } });
     phase = 'live_encrypted_and_tombstone_readback_accept_paid_unchanged';
     const validBefore = await snapshot(), valid = make([samePlain, sameEncrypted, sameDeleted]);
-    const accepted = await call(valid); assert.equal(accepted.status, 'complete');
+    const accepted = await call(valid); phase = 'valid_unchanged_status'; assert.equal(accepted.status, 'complete');
     if (accepted.status !== 'complete') throw new Error('synthetic_expected_complete');
+    phase = 'valid_unchanged_charge';
     assert.equal(accepted.operation.charged, 10); assert.equal(accepted.operation.refunded, 0);
+    phase = 'valid_unchanged_result_flags';
     assert.ok(accepted.operation.results.every(result => result.ok && result.unchanged));
+    phase = 'valid_unchanged_metadata';
     const validAfter = await snapshot(); assert.deepEqual(validAfter.notes, validBefore.notes); assert.deepEqual(validAfter.intents, validBefore.intents);
+    phase = 'valid_unchanged_external_counts';
     assert.equal(validAfter.creates, validBefore.creates); assert.equal(validAfter.allocations, validBefore.allocations);
     phase = 'pending_lease_retry_never_rereads_frozen_unchanged';
     const mixed = make([row(), sameEncrypted]); loseReply = true;
