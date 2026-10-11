@@ -3,6 +3,7 @@ import type { Db, ClientSession } from 'mongodb';
 import { noteWriteIntentSchema, type NoteWriteIntent } from '../db/recoveryContract.js';
 import { finishSyncInSession, syncOperations, type SyncOperation } from './syncOperation.js';
 import { withRecoveryFence, type RecoveryLease } from './recoveryGate.js';
+import { assertRecoveryCoverage } from './recoveryCoverage.js';
 
 /** Inactive terminal settlement. No production route imports this module. */
 type Operation = SyncOperation & { recoveryFormat: 1 };
@@ -56,6 +57,9 @@ async function settleRecoverySync(db: Db, lease: RecoveryLease, input: unknown, 
       }
       if (!abandonUnfinished && ['prepared', 'verified'].includes(row.state) && row.leaseToken !== lease.token) throw new Error('recovery_settlement_lease_mismatch');
     }
+    // Missing unresolved journals are corruption, never an automatic refund.
+    // Closed abandoned-intent/failure pairs retain the existing replay policy.
+    assertRecoveryCoverage(operation, rows, operation.status === 'complete');
     const settled = await finishSyncInSession(db, operation, session);
     for (const row of rows) {
       if (!['prepared', 'verified'].includes(row.state)) continue;

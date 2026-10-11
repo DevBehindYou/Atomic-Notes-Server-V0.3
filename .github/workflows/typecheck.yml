@@ -298,3 +298,11 @@ jobs:
           path: ci-recovery-wire-adapter-proof.json
           if-no-files-found: ignore
           retention-days: 7
+      - name: Upload sanitized classified admission and replacement proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitized-recovery-classified-proof
+          path: ci-recovery-classified-proof.json
+          if-no-files-found: ignore
+          retention-days: 7
