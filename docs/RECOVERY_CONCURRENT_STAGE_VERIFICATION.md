@@ -33,7 +33,8 @@ cannot begin until a worker is released. While parked, the operation is paid and
 pending, all ten journals exist, and no note, sequence or result is published.
 After release, exactly ten immutable generations commit in original row order.
 
-A second ten-row operation parks eight workers, rejects one create with 503 and
+A second ten-row operation parks eight workers, rejects one create with an opaque
+`ECONNRESET` transport failure and
 holds the other seven. The coordinator must remain unresolved until those seven
 finish. It returns the original failure with no published notes/cursor/results,
 no refund, seven verified journals and three prepared journals. This distinguishes
@@ -65,6 +66,9 @@ pass is claimed; local dependencies are absent and none were installed.
 This is scheduling parity and interruption-drain acceptance, not complete
 production partial-error parity. Successful-subset commits, deletion-dependent
 capacity orchestration, invalid-grant classification, later supersession, SDK
-retry/backoff and legacy repair remain unimplemented in this slice. Production
+retry/backoff and legacy repair were outside this scheduling slice. The later
+retry slice reuses the existing SDK retry policy; this drain probe uses a
+non-retryable transport error so its scheduling assertions retain that boundary.
+Production
 activation, real Drive/Atlas/OAuth, native two-device and signed-upgrade testing
 remain separate. R11/R16 stay partial.
