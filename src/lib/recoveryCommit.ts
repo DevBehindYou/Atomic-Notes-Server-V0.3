@@ -28,10 +28,11 @@ async function checkedRows(db: Db, lease: RecoveryLease, ids: string[], session:
   return rows;
 }
 
-/** The optional barrier belongs to the injected test-only candidate path. */
+/** Optional composition barriers belong to the inactive candidate path. */
 export async function commitRecoveryIntents(db: Db, lease: RecoveryLease, input: unknown,
   drive: drive_v3.Drive, parentId: string,
-  afterWrites?: (session: ClientSession) => Promise<void>): Promise<Map<string, NoteDoc>> {
+  afterWrites?: (session: ClientSession) => Promise<void>,
+  beforeWrites?: (session: ClientSession) => Promise<void>): Promise<Map<string, NoteDoc>> {
   const ids = z.array(z.string().length(110)).min(1).max(50).parse(input);
   if (new Set(ids).size !== ids.length) throw new Error('recovery_commit_duplicate_intent');
   const observed = await withRecoveryFence(db, lease, (session) => checkedRows(db, lease, ids, session));
@@ -49,6 +50,7 @@ export async function commitRecoveryIntents(db: Db, lease: RecoveryLease, input:
   return withRecoveryFence(db, lease, async (session) => {
     const rows = await checkedRows(db, lease, ids, session);
     if (JSON.stringify(rows) !== JSON.stringify(observed)) throw new Error('recovery_commit_manifest_changed');
+    if (beforeWrites) await beforeWrites(session);
     const entries: NoteMetadataEntry[] = [];
     const now = new Date();
     for (const row of rows) {
