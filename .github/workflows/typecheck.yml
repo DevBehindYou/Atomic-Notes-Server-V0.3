@@ -29,7 +29,28 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Typecheck
-        run: npm run typecheck
+        run: |
+          node --input-type=module <<'NODE'
+          import { spawnSync } from 'node:child_process';
+          import { writeFileSync } from 'node:fs';
+          const checked = spawnSync('npm', ['run', 'typecheck', '--', '--pretty', 'false'], {
+            encoding: 'utf8', maxBuffer: 1024 * 1024,
+          });
+          const owned = new Set(['src/lib/sessionManagement.ts', 'src/routes/auth.ts', 'tests/sessionManagement.fixture.test.ts']);
+          const found = [...(checked.stdout ?? '').matchAll(/^([^\r\n]+)\((\d+),(\d+)\): error TS(\d+):/gm)];
+          const diagnostics = found.slice(0, 32).map(match => ({
+            file: owned.has(match[1]) ? match[1] : 'other',
+            line: owned.has(match[1]) ? Math.min(Number(match[2]), 10000) : 0,
+            column: owned.has(match[1]) ? Math.min(Number(match[3]), 10000) : 0,
+            code: 'TS' + match[4],
+          }));
+          const pass = checked.status === 0;
+          writeFileSync('ci-session-typecheck-diagnostics.json', JSON.stringify({ version: 1,
+            scope: 'bounded TypeScript location and code diagnostics; no compiler messages',
+            outcome: pass ? 'pass' : 'fail', overflow: found.length > 32, diagnostics }));
+          console.log(JSON.stringify({ typecheck: pass ? 'pass' : 'fail', diagnostic_count: diagnostics.length }));
+          process.exitCode = pass ? 0 : 1;
+          NODE
       - name: Audit dependencies
         run: npm audit --audit-level=high
       - name: Build
@@ -352,5 +373,13 @@ jobs:
         with:
           name: sanitized-session-management-proof
           path: ci-session-management-proof.json
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Upload sanitized session compiler diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitized-session-typecheck-diagnostics
+          path: ci-session-typecheck-diagnostics.json
           if-no-files-found: ignore
           retention-days: 7
