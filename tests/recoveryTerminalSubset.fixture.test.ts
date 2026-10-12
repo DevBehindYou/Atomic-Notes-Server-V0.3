@@ -76,7 +76,7 @@ test('inactive trusted terminal partition commits metadata and failures atomical
     // classifier. These supplied classifications are revalidated at admission.
     const admit = async (rows: Row[], writes: Row[], mode: 'standard' | 'instant' = 'instant', classified: unknown[] = []) => {
       const requestId = randomUUID(), operationId = `${fixture.owner}:${requestId}`, now = new Date();
-      const intents = [];
+      const intents: NoteWriteIntent[] = [];
       for (const row of writes) {
         const old = await collections.notes(db).findOne({ _id: row.id });
         intents.push(noteWriteIntentSchema.parse({ _id: `${operationId}:${row.id}`, format: 1, userId: fixture.owner,

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { Db, ClientSession } from 'mongodb';
 import type { drive_v3 } from 'googleapis';
-import { collections } from '../db/collections.js';
+import { collections, type NoteDoc } from '../db/collections.js';
 import { noteWriteIntentSchema, type NoteWriteIntent } from '../db/recoveryContract.js';
 import { assertRecoveryCoverage } from './recoveryCoverage.js';
 import { assertRecoveryPreimageInSession } from './recoveryIntent.js';
@@ -58,7 +58,7 @@ export async function settleRecoverySubset(db: Db, lease: RecoveryLease, input: 
         }
       }
     }
-    const preimages = [];
+    const preimages: (NoteDoc | null)[] = [];
     for (const row of rows) preimages.push(await collections.notes(db).findOne({ _id: row.noteId }, { session }));
     if (operation.status === 'pending') {
       const failedActiveDelete = rows.some((row, i) => failure.has(row._id) && row.targetFlags.deleted && preimages[i]?.deleted === false);
