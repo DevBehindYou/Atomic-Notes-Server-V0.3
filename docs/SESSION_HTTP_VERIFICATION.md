@@ -3,8 +3,10 @@
 Fixture-only follow-up from verified Server main
 `9043f90c276f7095f4551b415e41dfbaf6ac52b4`. The guarded loopback assembly adds
 the existing auth router so its real logout endpoint can revoke synthetic
-sessions. Google login routes are not invoked. Production source, schemas,
-dependencies and session policy are unchanged.
+sessions. Google login routes are not invoked. The original fixture did not
+change production session policy. The 12 October 2026 lifetime follow-up changes
+new App sessions to 180 days; see SESSION_LIFETIME_VERIFICATION.md. Schemas and
+dependencies remain unchanged.
 
 The actual HTTP/Mongo case proves that logout retires only the supplied session:
 its later notes request gets 401, while the other same-owner session and the
@@ -15,7 +17,7 @@ writes are unchanged.
 
 A synthetic session is made expired only in the generated namespace, and real
 auth refuses it without waiting for TTL cleanup. Six sessions then use the real
-issuance helper: stored IDs are hashes, each expiry is seven days after creation,
+issuance helper: stored IDs are hashes, each expiry is now 180 days after creation,
 and five issued sessions remain valid. Same-millisecond ordering ties are not
 characterized as deterministic newest-device selection by this case.
 

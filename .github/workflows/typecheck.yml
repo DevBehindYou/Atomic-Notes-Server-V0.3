@@ -338,3 +338,11 @@ jobs:
           path: ci-recovery-terminal-subset-proof.json
           if-no-files-found: ignore
           retention-days: 7
+      - name: Upload sanitized App session lifetime proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitized-session-lifetime-proof
+          path: ci-session-lifetime-proof.json
+          if-no-files-found: ignore
+          retention-days: 7
