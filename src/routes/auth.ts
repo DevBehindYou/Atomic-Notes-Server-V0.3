@@ -14,6 +14,8 @@ import { encryptToken, decryptToken } from '../lib/crypto.js';
 import { createSession, revokeSession } from '../lib/session.js';
 import { logEvent } from '../lib/logs.js';
 import { requireAuth } from '../middleware/auth.js';
+import { bodyLimit } from 'hono/body-limit';
+import { listManagedSessions, revokeManagedSession } from '../lib/sessionManagement.js';
 
 const auth = new Hono();
 
@@ -151,6 +153,19 @@ auth.post('/logout', requireAuth, async (c) => {
   await revokeSession(db, token);
   await logEvent(db, 'logout', { userId });
   return c.json({ ok: true });
+});
+
+auth.get('/sessions', requireAuth, async (c) => {
+  c.header('Cache-Control', 'no-store');
+  const db = await getDb();
+  return c.json(await listManagedSessions(db, c.get('userId'), c.get('sessionToken') as string));
+});
+
+auth.post('/sessions/revoke', requireAuth, bodyLimit({ maxSize: 1024,
+  onError: c => c.json({ error: 'request_too_large' }, 413) }), async (c) => {
+  c.header('Cache-Control', 'no-store');
+  const db = await getDb();
+  return c.json(await revokeManagedSession(db, c.get('userId'), c.get('sessionToken') as string, await c.req.json()));
 });
 
 export default auth;
