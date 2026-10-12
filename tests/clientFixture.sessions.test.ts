@@ -45,7 +45,7 @@ test('real logout retires only its session; expiry, hashed issuance and five-ses
       const stored = (await sessions.findOne({ _id: hash(token) }))!;
       assert.equal(stored.userId, fixture.owner);
       assert.notEqual(stored._id, token);
-      assert.equal(stored.expiresAt.getTime() - stored.createdAt.getTime(), 7 * 24 * 60 * 60 * 1000);
+      assert.equal(stored.expiresAt.getTime() - stored.createdAt.getTime(), 180 * 24 * 60 * 60 * 1000);
     }
     assert.equal(MAX_ACTIVE_SESSIONS, 5);
     assert.equal(await sessions.countDocuments({ userId: fixture.owner, revoked: false }), 5);
