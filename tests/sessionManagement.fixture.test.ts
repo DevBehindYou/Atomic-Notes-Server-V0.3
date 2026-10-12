@@ -174,7 +174,8 @@ test('manual session management is bounded private and transactionally fenced fr
       cases[phase] = 'pass';
 
       phase = 'invalid_inventory';
-      await reset(); await db.collection('sessions').updateOne({ _id: targetId }, { $set: { userAgent: ['invalid'] } });
+      await reset(); await db.collection<{ _id: string; userAgent: unknown }>('sessions')
+        .updateOne({ _id: targetId }, { $set: { userAgent: ['invalid'] } });
       const invalidBefore = await sessionState();
       await refuse(() => listManagedSessions(db, owner, FIXTURE_TOKENS.a), 409, 'session_inventory_invalid');
       assert.deepEqual(await sessionState(), invalidBefore); cases[phase] = 'pass';
