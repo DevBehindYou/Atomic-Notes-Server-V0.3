@@ -55,10 +55,10 @@ allowlisted case labels, all `pass`:
 | `owned_cleanup` | Release only the currently owned lease; close the fixture; verify the generated database identity before owned cleanup. |
 
 The corrected causal head is
-`3102220c1f3792c90f3fd5b497527ede7c877cb1`, run
-[38712345997](https://github.com/DevBehindYou/Atomic-Notes-Server-V0.3/actions/runs/38712345997).
+`1a476fbe61e266885d7ff233fa0d3e59ea1f0d6d`, run
+[38713668480](https://github.com/DevBehindYou/Atomic-Notes-Server-V0.3/actions/runs/38713668480).
 Its coordinator blob equals accepted main. The fixture blob is
-`d2323914ab95e6d36ce73efeed296da5d62c5cba`; the fixed candidate keeps it unchanged.
+`c2a3e8cedd670544e7207d1630e53212cef2812a`; the fixed candidate keeps it unchanged.
 That causal run passed typecheck, audit, build/entrypoint, unit, integration and
 admin baseline gates. All previous 35 exact proof schemas passed. The new proof
 recorded both intended `raw_404` failures and `owned_cleanup: pass`. The proof
