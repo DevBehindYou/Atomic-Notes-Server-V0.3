@@ -43,27 +43,30 @@ export async function resumeRecoveryOperation(db: Db, lease: RecoveryLease,
     return { status: 'complete', operation: await finishRecoverySync(db, lease, operationId) };
   }
   const rows = await adoptRecoveryOperation(db, lease, operationId);
-  const prepared = rows.filter((row) => row.state === 'prepared');
+  const ready = rows.filter((row) => row.state === 'prepared' || row.state === 'verified');
+  const staging = rows.filter((row) => row.state === 'prepared');
   const needed: string[] = [];
-  // Resolve content first: a missing unuploaded generation is not failure or
-  // evidence that the client no longer has its text. Keep the paid receipt.
-  for (const row of prepared) {
-    if (content.has(row.noteId)) continue;
+  // Resolve every unfinished generation before staging. A verified generation
+  // may disappear too; only an observed 404 permits same-ID restaging. Present
+  // verified content stays create-free and is checked again by final commit.
+  for (const row of ready) {
+    if (row.state === 'prepared' && content.has(row.noteId)) continue;
     try {
-      content.set(row.noteId, await readNoteGenerationWith(drive, row.stagedFileId!, parentId));
+      const saved = await readNoteGenerationWith(drive, row.stagedFileId!, parentId);
+      if (row.state === 'prepared') content.set(row.noteId, saved);
     } catch (error) {
       const e = error as { code?: unknown; status?: unknown; response?: { status?: unknown } } | null;
       if (![e?.code, e?.status, e?.response?.status].some((value) => value === 404 || value === '404')) throw error;
-      needed.push(row.noteId);
+      if (!content.has(row.noteId)) needed.push(row.noteId);
+      else if (row.state === 'verified') staging.push(row);
     }
   }
   if (needed.length) return { status: 'needs_client_content', noteIds: needed };
   // Each intent owns separate fenced transactions; the shared metadata commit
   // below stays sequential. Drain all started stages before any error escapes,
   // so a failed request never leaves orphan asynchronous staging work.
-  await mapConcurrent(prepared, 8, (row) =>
+  await mapConcurrent(staging, 8, (row) =>
     stageRecoveryIntent(db, lease, row._id, drive, parentId, content.get(row.noteId)));
-  const ready = rows.filter((row) => row.state === 'prepared' || row.state === 'verified');
   if (ready.length) await commitRecoveryIntents(db, lease, ready.map((row) => row._id), drive, parentId);
   return { status: 'complete', operation: await finishRecoverySync(db, lease, operationId) };
 }
