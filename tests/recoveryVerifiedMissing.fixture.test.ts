@@ -266,7 +266,12 @@ test('inactive verified missing generations request retained content and restage
     const encryptedPaid = await protectedState(), encryptedReceipt = await resume(encryptedRequest, [encrypted]);
     assert.equal(encryptedReceipt.status, 'complete'); if (encryptedReceipt.status !== 'complete') throw new Error('synthetic_expected_complete');
     assert.equal(encryptedReceipt.operation.refunded, 0); assert.deepEqual((await protectedState()).wallet, encryptedPaid.wallet);
-    await checkPull(encrypted, 1); await checkReplay(encryptedRequest, encryptedReceipt.operation); cases.encrypted_retry = 'pass';
+    // Fresh-note versions use the existing global monotonic sequence; earlier
+    // commits in this same fixture make this value greater than one.
+    const encryptedVersion = encryptedPaid.counter!.value + 1;
+    assert.equal(encryptedReceipt.operation.results[0].version, encryptedVersion);
+    assert.equal(encryptedReceipt.operation.results[0].seq, encryptedVersion);
+    await checkPull(encrypted, encryptedVersion); await checkReplay(encryptedRequest, encryptedReceipt.operation); cases.encrypted_retry = 'pass';
 
     phase = 'committed_terminal_exclusions';
     const partial = await admit([content(), content()]); await stage(partial, 0); await missing(partial, 1);
