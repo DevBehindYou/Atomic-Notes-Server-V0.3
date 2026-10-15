@@ -22,9 +22,6 @@ test('inactive verified missing generations request retained content and restage
       wipe_epoch_fence: 'not_run', owned_cleanup: 'not_run',
     };
     const causal = { missing_request: 'not_run', matching_retry: 'not_run' };
-    t.after(() => writeFileSync('ci-recovery-verified-missing-proof.json', JSON.stringify({ version: 1,
-      scope: 'disposable inactive verified missing generation retained ID recovery', phase,
-      outcome: passed ? 'pass' : 'fail', causal, cases })));
     const parent = 'synthetic-verified-missing-parent', files = new Map<string, AtomicFileV1>();
     const metadata = new Map<string, Record<string, unknown>>();
     let reads = 0, creates = 0, writes = 0;
@@ -44,8 +41,23 @@ test('inactive verified missing generations request retained content and restage
     };
     const fixture = await startClientFixture(process.env.MONGODB_URI, process.env.MONGODB_DB_NAME, notesDrive);
     let cleanupLease: (() => Promise<unknown>) | undefined;
-    t.after(async () => { unblock?.(); try { await delayedCompletion; await cleanupLease?.(); }
-      finally { assertFixtureCleanup(fixture.database, fixture.database); await fixture.close(); } });
+    t.after(async () => {
+      unblock?.();
+      try {
+        try { await delayedCompletion; await cleanupLease?.(); }
+        finally { assertFixtureCleanup(fixture.database, fixture.database); await fixture.close(); }
+        cases.owned_cleanup = 'pass';
+      } catch {
+        cases.owned_cleanup = 'fail'; passed = false;
+        throw new Error('synthetic_owned_cleanup_failed');
+      } finally {
+        // Emit only after the actual owned cleanup settles, including either
+        // causal early-return path. No raw cleanup exception enters the proof.
+        writeFileSync('ci-recovery-verified-missing-proof.json', JSON.stringify({ version: 1,
+          scope: 'disposable inactive verified missing generation retained ID recovery', phase,
+          outcome: passed ? 'pass' : 'fail', causal, cases }));
+      }
+    });
     const { getDb } = await import('../src/db/mongo.js');
     const { collections } = await import('../src/db/collections.js');
     const { acquireRecoveryLease, releaseRecoveryLease, withRecoveryWipe } = await import('../src/lib/recoveryGate.js');
@@ -339,6 +351,6 @@ test('inactive verified missing generations request retained content and restage
     assert.equal(journals.includes(next.body), false); assert.equal(journals.includes(encrypted.payload), false);
     assert.equal(JSON.stringify(files.get(oldId)), oldBytes);
     await releaseRecoveryLease(db, lease); cleanupLease = undefined;
-    assertFixtureCleanup(db.databaseName, fixture.database); await fixture.close();
-    cases.owned_cleanup = 'pass'; phase = 'complete'; passed = true;
+    assertFixtureCleanup(db.databaseName, fixture.database);
+    phase = 'complete'; passed = true;
   });
