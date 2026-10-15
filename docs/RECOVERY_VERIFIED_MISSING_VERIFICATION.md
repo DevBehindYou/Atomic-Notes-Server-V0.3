@@ -54,6 +54,17 @@ allowlisted case labels, all `pass`:
 | `wipe_epoch_fence` | A delayed create reply after an epoch change cannot verify/publish/settle; the pre-wipe manifest refuses adoption. |
 | `owned_cleanup` | Release only the currently owned lease; close the fixture; verify the generated database identity before owned cleanup. |
 
+The corrected causal head is
+`3102220c1f3792c90f3fd5b497527ede7c877cb1`, run
+[38712345997](https://github.com/DevBehindYou/Atomic-Notes-Server-V0.3/actions/runs/38712345997).
+Its coordinator blob equals accepted main. The fixture blob is
+`d2323914ab95e6d36ce73efeed296da5d62c5cba`; the fixed candidate keeps it unchanged.
+That causal run passed typecheck, audit, build/entrypoint, unit, integration and
+admin baseline gates. All previous 35 exact proof schemas passed. The new proof
+recorded both intended `raw_404` failures and `owned_cleanup: pass`. The proof
+is emitted only after the asynchronous checked cleanup actually settles,
+including the early return after either causal assertion fails.
+
 Protected-state snapshots explicitly include wallet, ledger, notes, operation,
 manifest, intent state/outcome and sequence counter. They exclude permitted
 journal adoption changes to `leaseToken` and `updatedAt`, and fence gate touches.
