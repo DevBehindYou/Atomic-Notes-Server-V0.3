@@ -383,3 +383,11 @@ jobs:
           path: ci-session-typecheck-diagnostics.json
           if-no-files-found: ignore
           retention-days: 7
+      - name: Upload sanitized verified missing generation recovery proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitized-recovery-verified-missing-proof
+          path: ci-recovery-verified-missing-proof.json
+          if-no-files-found: ignore
+          retention-days: 7
