@@ -72,6 +72,27 @@ The proof never contains note text, payloads, credentials, identifiers or raw
 exceptions. All prior 35 proof uploads and the accepted admin pagination
 baseline remain in the workflow.
 
+## Fixture sequencing correction — 16 October 2026
+
+Fixed-candidate CI [38714300515](https://github.com/DevBehindYou/Atomic-Notes-Server-V0.3/actions/runs/38714300515)
+passed both causal cases, then refused admission of the independent wipe-fence
+scenario with `recovery_admission_reconciliation_required`. The preceding
+eight-stage refusal correctly leaves its existing paid operation pending.
+The fixture now reconciles that same request after checking drained replies
+and unchanged protected state, and asserts no pending operation remains before
+admitting the wipe scenario. No production admission guard is weakened.
+
+This correction changes only the post-causal fixture sequence. The earlier
+whole-fixture blob-equality statement above describes the original candidate,
+not this corrected fixture. The causal assertions and production fix are
+unchanged. A new fixed-head CI run is required before acceptance.
+
+Local verification on 16 October: `npm run typecheck` passed and `npm test`
+passed all 115 tests. Independent source/spec review found no blocking issue.
+The disposable Mongo fixture, sanitized proof and all required integration
+gates still require the corrected candidate's CI run; no local MongoDB or
+real Drive verification is claimed.
+
 ## Limits
 
 There is no production route import, HTTP contract change, new schema/index,
@@ -82,3 +103,9 @@ Missing committed content, real Drive behavior, old-writer exclusion,
 historical repair, migrations, production activation and native/two-device/
 signed acceptance remain separate. This does not close R11 or R16 or increase
 the original findings' completion credit.
+
+The retained hash binds note content and flags, not original `createdAt` or
+`updatedAt` values. Matching supplied content is verified against that hash;
+this is not a byte-for-byte reconstruction claim for the original full file's
+timestamps. A retained-ID 409 still requires exact readback of the supplied
+candidate, including its timestamps, before verification.

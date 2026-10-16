@@ -337,6 +337,12 @@ test('inactive verified missing generations request retained content and restage
     assert.equal(maxStages, 8); assert.equal(activeStages, 0); assert.equal(startedStages, finishedStages);
     assert.deepEqual(await protectedState(), drainPaid); cases.eight_stage_drain = 'pass';
 
+    // The refusal intentionally retains this paid pending operation. Reconcile
+    // that same request before admitting the independent wipe-fence scenario;
+    // admission must continue refusing unrelated work while recovery is pending.
+    assert.equal((await resume(drain, drainTargets)).status, 'complete');
+    assert.equal(await syncOperations(db).countDocuments({ userId: fixture.owner, status: 'pending' }), 0);
+
     phase = 'wipe_epoch_fence';
     const wipeTarget = { ...handoffTarget, body: 'Public synthetic pre-wipe edit' }, wipe = await admit([wipeTarget]); await missing(wipe);
     let announceWipe: (() => void) | undefined;
