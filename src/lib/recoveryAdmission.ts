@@ -3,7 +3,7 @@ import type { Db, ClientSession } from 'mongodb';
 import { collections } from '../db/collections.js';
 import { parseRecoveryIntents } from '../db/recoveryContract.js';
 import { remoteNoteRowSchema } from '../types/noteWire.js';
-import { noteContentHash } from './contentHash.js';
+import { noteContentHash, resolveNoteImportance } from './contentHash.js';
 import { energyWallet, energyGrantDaily, dailyGrantDue } from './energy.js';
 import { assertSyncWindow, debitSyncInSession, fingerprintOf, syncOperations, finishSyncInSession, type SyncOperation } from './syncOperation.js';
 import { prepareRecoveryIntentsInSession } from './recoveryIntent.js';
@@ -29,8 +29,9 @@ export async function beginRecoverySync(db: Db, lease: RecoveryLease, request: u
       intents.some((intent, i) => intent.operationId !== id || intent.userId !== lease.userId ||
         intent.fingerprint !== fingerprint || intent.noteId !== writeRows[i].id || intent.expectedVersion !== writeRows[i].base_version ||
         intent.state !== 'prepared' || intent.leaseToken !== lease.token || intent.wipeEpoch !== lease.wipeEpoch ||
-        !intent.stagedFileId || intent.targetFlags.deleted !== writeRows[i].deleted || intent.targetHash !== noteContentHash(writeRows[i]) ||
-        intent.targetFlags.kind !== writeRows[i].kind || intent.targetFlags.pinned !== writeRows[i].pinned || intent.targetFlags.encV !== writeRows[i].enc_v)) {
+        !intent.stagedFileId || intent.targetFlags.deleted !== writeRows[i].deleted || intent.targetHash !== noteContentHash(resolveNoteImportance(writeRows[i], intent.targetFlags)) ||
+        intent.targetFlags.kind !== writeRows[i].kind || intent.targetFlags.pinned !== writeRows[i].pinned ||
+        (writeRows[i].important !== undefined && !!intent.targetFlags.important !== writeRows[i].important) || intent.targetFlags.encV !== writeRows[i].enc_v)) {
     throw new Error('recovery_admission_manifest_invalid');
   }
   const prior = await withRecoveryFence(db, lease, async (session) => {
@@ -63,7 +64,7 @@ export async function beginRecoverySync(db: Db, lease: RecoveryLease, request: u
         const row = rows.find(candidate => candidate.id === result.id)!;
         const existing = await collections.notes(db).findOne({ _id: row.id }, { session });
         if (!existing || existing.userId !== lease.userId || existing.localVersion !== result.version ||
-            (result.ok ? row.base_version !== existing.localVersion || existing.contentHash !== noteContentHash(row) ||
+            (result.ok ? row.base_version !== existing.localVersion || existing.contentHash !== noteContentHash(resolveNoteImportance(row, existing)) ||
               existing.deleted !== row.deleted || existing.updatedAt.toISOString() !== result.updated_at :
               row.base_version === existing.localVersion)) throw new Error('recovery_classification_changed');
       }
@@ -77,6 +78,12 @@ export async function beginRecoverySync(db: Db, lease: RecoveryLease, request: u
       operation = { ...operation, recoveryFormat: 1, results: classified } as Operation;
     }
     assertRecoveryCoverage(operation, intents);
+    // Omitted old-client values must be resolved from the held preimage, never invented by a manifest.
+    for (let i = 0; i < writeRows.length; i++) {
+      if (writeRows[i].important !== undefined) continue;
+      const current = await collections.notes(db).findOne({ _id: writeRows[i].id }, { session });
+      if (!!intents[i].targetFlags.important !== !!current?.important) throw new Error('recovery_admission_importance_changed');
+    }
     const persisted = intents.length ? await prepareRecoveryIntentsInSession(db, lease, intents, session) : [];
     if (afterWrites) await afterWrites(session);
     if (!persisted.length) operation = await finishSyncInSession(db, operation, session);

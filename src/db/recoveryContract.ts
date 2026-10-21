@@ -14,7 +14,7 @@ export const noteWriteIntentSchema = z.object({
   operationId: z.string().length(73), fingerprint: hash, expectedVersion: safeInteger,
   expectedFileId: fileId.nullable(), expectedHash: hash.nullable(), stagedFileId: fileId.nullable(), targetHash: hash,
   targetFlags: z.object({ kind: z.enum(['text', 'todo']), encV: z.union([z.literal(0), z.literal(1)]),
-    pinned: z.boolean(), deleted: z.boolean() }).strict(),
+    pinned: z.boolean(), important: z.boolean().optional(), deleted: z.boolean() }).strict(),
   wipeEpoch: safeInteger, leaseToken: uuid,
   state: z.enum(['prepared', 'verified', 'committed', 'abandoned', 'superseded']),
   createdAt: z.date(), updatedAt: z.date(),

@@ -6,7 +6,7 @@ import { noteWriteIntentSchema, type NoteWriteIntent } from '../db/recoveryContr
 import { remoteNoteRowSchema } from '../types/noteWire.js';
 import { migrateAtomicFile } from '../types/atomicFile.js';
 import { NOTE_LIMIT } from './energy.js';
-import { noteContentHash } from './contentHash.js';
+import { noteContentHash, resolveNoteImportance } from './contentHash.js';
 import { fingerprintOf, syncOperations } from './syncOperation.js';
 import { generateNoteFileIdsWith, readNoteGenerationWith } from './driveGeneration.js';
 import { withRecoveryFence, type RecoveryLease } from './recoveryGate.js';
@@ -60,7 +60,7 @@ export async function runClassifiedRecoveryPush(db: Db, authenticatedOwner: stri
       // Version precedes hash equality, including identical stale payloads.
       if (existing && row.base_version !== existing.localVersion) return [classifiedResultSchema.parse({
         id: row.id, ok: false, error: 'note_conflict', version: existing.localVersion })];
-      if (existing && existing.contentHash === noteContentHash(row) && existing.deleted === row.deleted) return [classifiedResultSchema.parse({
+      if (existing && existing.contentHash === noteContentHash(resolveNoteImportance(row, existing)) && existing.deleted === row.deleted) return [classifiedResultSchema.parse({
         id: row.id, ok: true, unchanged: true, version: existing.localVersion, updated_at: existing.updatedAt.toISOString() })];
       return [];
     });
@@ -77,8 +77,8 @@ export async function runClassifiedRecoveryPush(db: Db, authenticatedOwner: stri
         const intent = stored.find(candidate => candidate.noteId === row.id);
         if (!intent) return [];
         if (intent.expectedVersion !== row.base_version || intent.wipeEpoch !== lease.wipeEpoch || !intent.stagedFileId ||
-            intent.targetHash !== noteContentHash(row) || intent.targetFlags.kind !== row.kind || intent.targetFlags.encV !== row.enc_v ||
-            intent.targetFlags.pinned !== row.pinned || intent.targetFlags.deleted !== row.deleted) throw refuse('recovery_manifest_invalid');
+            intent.targetHash !== noteContentHash(resolveNoteImportance(row, intent.targetFlags)) || intent.targetFlags.kind !== row.kind || intent.targetFlags.encV !== row.enc_v ||
+            intent.targetFlags.pinned !== row.pinned || (row.important !== undefined && !!intent.targetFlags.important !== row.important) || intent.targetFlags.deleted !== row.deleted) throw refuse('recovery_manifest_invalid');
         return [intent];
       });
       return ordered;
@@ -95,24 +95,25 @@ export async function runClassifiedRecoveryPush(db: Db, authenticatedOwner: stri
       const existing = frozen.preimages[index]!, row = rows[index];
       if (existing.generationFormat !== 1) throw refuse('recovery_unchanged_legacy_unsupported');
       if (!existing.driveFileId || existing.kind !== row.kind || existing.encV !== row.enc_v ||
-          existing.pinned !== row.pinned) throw refuse('recovery_unchanged_metadata_mismatch');
+          existing.pinned !== row.pinned || !!existing.important !== !!resolveNoteImportance(row, existing).important) throw refuse('recovery_unchanged_metadata_mismatch');
       const content = await readNoteGenerationWith(drive, existing.driveFileId, parentId);
       const contentHash = noteContentHash({ ...content, enc_v: content.encV });
       if (content.id !== row.id || content.kind !== existing.kind || content.encV !== existing.encV ||
-          content.pinned !== existing.pinned || contentHash !== existing.contentHash ||
-          contentHash !== noteContentHash(row)) {
+          content.pinned !== existing.pinned || !!content.important !== !!existing.important || contentHash !== existing.contentHash ||
+          contentHash !== noteContentHash(resolveNoteImportance(row, existing))) {
         throw refuse('recovery_unchanged_content_mismatch');
       }
     }
     const writes = rows.filter(row => !frozen.results.some(result => result.id === row.id));
     const ids = writes.length ? await generateNoteFileIdsWith(drive, writes.length) : [], now = new Date();
-    intents = writes.map((row, i) => {
+    intents = writes.map((inputRow, i) => {
+      const row = resolveNoteImportance(inputRow, frozen.preimages[rows.findIndex(candidate => candidate.id === inputRow.id)]);
       const existing = frozen.preimages[rows.findIndex(candidate => candidate.id === row.id)];
       return noteWriteIntentSchema.parse({ _id: `${operationId}:${row.id}`, format: 1, userId: authenticatedOwner,
         noteId: row.id, requestId, operationId, fingerprint, expectedVersion: row.base_version,
         expectedFileId: existing?.driveFileId ?? null, expectedHash: existing?.contentHash ?? null,
         stagedFileId: ids[i], targetHash: noteContentHash(row), targetFlags: { kind: row.kind, encV: row.enc_v,
-          pinned: row.pinned, deleted: row.deleted }, wipeEpoch: lease.wipeEpoch, leaseToken: lease.token,
+          pinned: row.pinned, ...(row.important === undefined ? {} : { important: row.important }), deleted: row.deleted }, wipeEpoch: lease.wipeEpoch, leaseToken: lease.token,
         state: 'prepared', createdAt: now, updatedAt: now, committedVersion: null, committedSequence: null, terminalReason: null });
     });
     const admitted = await beginRecoverySync(db, lease, requestId, rows, mode, intents, async session => {
@@ -123,9 +124,9 @@ export async function runClassifiedRecoveryPush(db: Db, authenticatedOwner: stri
     intents = admitted.intents;
   }
   const content = intents.map(intent => {
-    const row = rows.find(candidate => candidate.id === intent.noteId)!;
+    const row = resolveNoteImportance(rows.find(candidate => candidate.id === intent.noteId)!, intent.targetFlags);
     return migrateAtomicFile({ version: 1, id: row.id, kind: row.kind, title: row.title, body: row.body,
-      items: row.items, pinned: row.pinned, encV: row.enc_v, payload: row.payload,
+      items: row.items, pinned: row.pinned, ...(row.important === undefined ? {} : { important: row.important }), encV: row.enc_v, payload: row.payload,
       createdAt: new Date(row.created_at).toISOString(), updatedAt: intent.createdAt.toISOString() });
   });
   // One coupled group: no addition commits using an unverified deletion credit.

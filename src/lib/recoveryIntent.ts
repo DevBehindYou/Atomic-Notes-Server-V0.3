@@ -88,7 +88,7 @@ export async function stageRecoveryIntent(db: Db, lease: RecoveryLease, intentId
     return current;
   });
   const content = migrateAtomicFile(input);
-  if (content.id !== row.noteId || content.kind !== row.targetFlags.kind || content.pinned !== row.targetFlags.pinned ||
+  if (content.id !== row.noteId || content.kind !== row.targetFlags.kind || content.pinned !== row.targetFlags.pinned || !!content.important !== !!row.targetFlags.important ||
       content.encV !== row.targetFlags.encV || noteContentHash({ ...content, enc_v: content.encV }) !== row.targetHash) {
     throw new Error('recovery_staged_content_mismatch');
   }

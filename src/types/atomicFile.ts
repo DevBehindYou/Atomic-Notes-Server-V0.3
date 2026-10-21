@@ -21,6 +21,7 @@ export const atomicFileV1Schema = z.object({
   body: z.string(),
   items: z.array(todoItemSchema).default([]),
   pinned: z.boolean().default(false),
+  important: z.boolean().optional(),
   encV: z.number().int().default(0),
   payload: z.string().nullable().default(null),
   createdAt: z.string().datetime(),

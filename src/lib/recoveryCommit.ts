@@ -42,7 +42,7 @@ export async function commitRecoveryIntents(db: Db, lease: RecoveryLease, input:
   for (const row of observed) {
     const content = await readNoteGenerationWith(drive, row.stagedFileId!, parentId);
     if (content.id !== row.noteId || content.kind !== row.targetFlags.kind || content.encV !== row.targetFlags.encV ||
-        content.pinned !== row.targetFlags.pinned || noteContentHash({ ...content, enc_v: content.encV }) !== row.targetHash) {
+        content.pinned !== row.targetFlags.pinned || !!content.important !== !!row.targetFlags.important || noteContentHash({ ...content, enc_v: content.encV }) !== row.targetHash) {
       throw new Error('recovery_commit_content_mismatch');
     }
     contents.set(row.noteId, content);
@@ -62,7 +62,8 @@ export async function commitRecoveryIntents(db: Db, lease: RecoveryLease, input:
         contentHash: row.targetHash, generationFormat: 1, syncStatus: 'synced', updatedAt: now, lastSyncedAt: now };
       if (existing) entries.push({ id: row.noteId, fields, existing });
       else entries.push({ id: row.noteId, fields, fresh: { _id: row.noteId, userId: lease.userId, folderId: null,
-        kind: row.targetFlags.kind, pinned: row.targetFlags.pinned, deleted: row.targetFlags.deleted, encV: row.targetFlags.encV,
+        kind: row.targetFlags.kind, pinned: row.targetFlags.pinned,
+        ...(row.targetFlags.important === undefined ? {} : { important: row.targetFlags.important }), deleted: row.targetFlags.deleted, encV: row.targetFlags.encV,
         driveFileId: row.stagedFileId!, driveRevisionId: null, localVersion: 1, contentHash: row.targetHash,
         syncStatus: 'synced', createdAt: new Date(contents.get(row.noteId)!.createdAt), updatedAt: now, lastSyncedAt: now } });
     }

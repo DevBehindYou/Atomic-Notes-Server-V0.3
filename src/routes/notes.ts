@@ -8,7 +8,7 @@ import { admitLogoutAttempt, findLogoutBatch, openLogoutBatch, settleLogoutBatch
 import { logoutBatchSchema, LOGOUT_BOUNDS } from '../lib/logoutContract.js';
 import { inspectLogoutRecovery, readLogoutRecoveryReceipts, commitLogoutRecovery } from '../lib/logoutRecovery.js';
 import { readLogoutRecoveryBody } from '../lib/logoutRecoveryBody.js';
-import { noteContentHash } from '../lib/contentHash.js';
+import { noteContentHash, resolveNoteImportance } from '../lib/contentHash.js';
 import { acquireOperationLock } from '../lib/operationLock.js';
 import { remoteNoteRowSchema } from '../types/noteWire.js';
 import { mapConcurrent } from '../lib/concurrency.js';
@@ -234,6 +234,7 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
       body: content.body,
       items: content.items as RemoteNoteRow['items'],
       pinned: m.pinned,
+      ...(m.important === undefined ? {} : { important: m.important }),
       deleted: m.deleted,
       created_at: m.createdAt.toISOString(),
       updated_at: m.updatedAt.toISOString(),
@@ -327,13 +328,14 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
         await recordSyncResult(db, operation, { id: row.id, ok: false, error: 'note_conflict', version: existing.localVersion });
         continue;
       }
-      const hash = noteContentHash(row);
+      const effectiveRow = resolveNoteImportance(row, existing);
+      const hash = noteContentHash(effectiveRow);
       if (existing && existing.contentHash === hash && existing.deleted === row.deleted) {
         unchanged++;
         await recordSyncResult(db, operation, { id: row.id, ok: true, version: existing.localVersion, updated_at: existing.updatedAt.toISOString(), unchanged: true });
         continue;
       }
-      jobs.push({ row, existing, hash });
+      jobs.push({ row: effectiveRow, existing, hash });
     }
 
     // Drive writes overlap; nothing is committed to MongoDB until they are all done.
@@ -346,6 +348,7 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
         body: row.body,
         items: row.items,
         pinned: row.pinned,
+        ...(row.important === undefined ? {} : { important: row.important }),
         encV: row.enc_v,
         payload: row.payload,
         createdAt: new Date(row.created_at).toISOString(),
@@ -443,6 +446,7 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
         userId,
         kind: row.kind,
         pinned: row.pinned,
+        ...(row.important === undefined ? {} : { important: row.important }),
         deleted: row.deleted,
         encV: row.enc_v,
         driveFileId: w.driveFileId,
@@ -531,7 +535,7 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
           // metadata version or advance the caller past it. Legacy rows without a
           // fingerprint retain compatibility, with identity/flag checks only.
           if (content.id !== m._id || content.kind !== m.kind ||
-              content.pinned !== m.pinned || content.encV !== m.encV ||
+              content.pinned !== m.pinned || !!content.important !== !!m.important || content.encV !== m.encV ||
               (m.contentHash && noteContentHash({ ...content, enc_v: content.encV }) !== m.contentHash)) {
             throw httpError('note_content_mismatch', 409);
           }
