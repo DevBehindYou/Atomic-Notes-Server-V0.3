@@ -50,7 +50,8 @@ export function logoutBatchFingerprint(input: unknown[]): string {
   if (new Set(rows.map(r => r.id)).size !== rows.length) throw new Error('duplicate_logout_note');
   const normalized = rows.map(r => ({
     id: r.id, kind: r.kind, title: r.title, body: r.body,
-    items: r.items.map(i => ({ text: i.text, done: i.done })), pinned: r.pinned, deleted: r.deleted,
+    items: r.items.map(i => ({ text: i.text, done: i.done })), pinned: r.pinned,
+    ...(r.important === undefined ? {} : { important: r.important }), deleted: r.deleted,
     created_at: r.created_at, ...(r.updated_at === undefined ? {} : { updated_at: r.updated_at }),
     enc_v: r.enc_v, payload: r.payload, base_version: r.base_version,
   }));

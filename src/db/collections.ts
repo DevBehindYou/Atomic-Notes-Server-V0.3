@@ -190,6 +190,7 @@ export const noteSchema = z.object({
   folderId: z.string().uuid().nullable(),
   kind: z.enum(['text', 'todo']),
   pinned: z.boolean().default(false),
+  important: z.boolean().optional(),
   deleted: z.boolean().default(false),
   encV: z.union([z.literal(0), z.literal(1)]).default(0),
   driveFileId: z.string(),

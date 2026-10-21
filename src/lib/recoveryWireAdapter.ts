@@ -62,7 +62,7 @@ export async function runFreshRecoveryPush(db: Db, authenticatedOwner: string, l
         const intent = noteWriteIntentSchema.parse(stored.find(candidate => candidate.noteId === row.id));
         if (intent.fingerprint !== fingerprint || intent.expectedVersion !== 0 || intent.expectedFileId !== null ||
             intent.expectedHash !== null || intent.targetFlags.deleted || intent.targetHash !== noteContentHash(row) ||
-            intent.targetFlags.kind !== row.kind || intent.targetFlags.encV !== row.enc_v || intent.targetFlags.pinned !== row.pinned ||
+            intent.targetFlags.kind !== row.kind || intent.targetFlags.encV !== row.enc_v || intent.targetFlags.pinned !== row.pinned || !!intent.targetFlags.important !== !!row.important ||
             intent.wipeEpoch !== lease.wipeEpoch || !intent.stagedFileId) throw refuse('recovery_manifest_invalid');
         return intent;
       });
@@ -74,7 +74,7 @@ export async function runFreshRecoveryPush(db: Db, authenticatedOwner: string, l
       _id: `${operationId}:${row.id}`, format: 1, userId: authenticatedOwner, noteId: row.id, requestId,
       operationId, fingerprint, expectedVersion: 0, expectedFileId: null, expectedHash: null,
       stagedFileId: ids[i], targetHash: noteContentHash(row), targetFlags: { kind: row.kind, encV: row.enc_v,
-        pinned: row.pinned, deleted: false }, wipeEpoch: lease.wipeEpoch, leaseToken: lease.token,
+        pinned: row.pinned, ...(row.important === undefined ? {} : { important: row.important }), deleted: false }, wipeEpoch: lease.wipeEpoch, leaseToken: lease.token,
       state: 'prepared', createdAt: now, updatedAt: now, committedVersion: null, committedSequence: null, terminalReason: null,
     }));
     // Callback is inside the SAME debit+manifest transaction. A capacity change
@@ -84,7 +84,7 @@ export async function runFreshRecoveryPush(db: Db, authenticatedOwner: string, l
     intents = admitted.intents;
   }
   const content = rows.map((row, i) => migrateAtomicFile({ version: 1, id: row.id, kind: row.kind,
-    title: row.title, body: row.body, items: row.items, pinned: row.pinned, encV: row.enc_v, payload: row.payload,
+    title: row.title, body: row.body, items: row.items, pinned: row.pinned, ...(row.important === undefined ? {} : { important: row.important }), encV: row.enc_v, payload: row.payload,
     createdAt: new Date(row.created_at).toISOString(), updatedAt: intents[i].createdAt.toISOString() }));
   return resumeRecoveryOperation(db, lease, operationId, drive, parentId, content);
 }

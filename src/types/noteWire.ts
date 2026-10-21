@@ -25,6 +25,7 @@ export const remoteNoteRowSchema = z.object({
   body: z.string().max(NOTE_LIMITS.body),
   items: z.array(todoItemSchema),
   pinned: z.boolean(),
+  important: z.boolean().optional(),
   deleted: z.boolean(),
   created_at: z.string().datetime({ offset: true }),
   updated_at: z.string().datetime({ offset: true }).optional(),
