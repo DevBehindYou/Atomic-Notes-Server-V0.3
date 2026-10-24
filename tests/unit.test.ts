@@ -11,7 +11,7 @@ import { escapeRegex } from '../src/lib/validation';
 import { registerErrorHandler } from '../src/middleware/errorHandler';
 import { requireAdmin } from '../src/middleware/adminAuth';
 import { encryptToken, decryptToken } from '../src/lib/crypto';
-import { remoteNoteRowSchema } from '../src/types/noteWire';
+import { NOTE_LIMITS, remoteNoteRowSchema } from '../src/types/noteWire';
 import { createNoteFileWith } from '../src/lib/googleDrive';
 import { assertProductionEnvironment, getEnvIssues } from '../src/lib/env';
 import { isDriveNotFound, isDriveRetryable, withDriveRetry } from '../src/lib/googleDrive';
@@ -137,7 +137,7 @@ test('encrypted and plaintext note content cannot be mixed', () => {
   assert.equal(remoteNoteRowSchema.safeParse({ ...base, enc_v: 1, payload: null }).success, false);
   assert.equal(remoteNoteRowSchema.safeParse({ ...base, enc_v: 1, payload: 'ciphertext', body: 'leak' }).success, false);
   assert.equal(remoteNoteRowSchema.safeParse({ ...base, enc_v: 0, payload: 'ciphertext' }).success, false);
-  assert.equal(remoteNoteRowSchema.safeParse({ ...base, enc_v: 0, payload: null, body: 'x'.repeat(131073) }).success, false);
+  assert.equal(remoteNoteRowSchema.safeParse({ ...base, enc_v: 0, payload: null, body: 'x'.repeat(NOTE_LIMITS.body + 1) }).success, false);
 });
 
 test('configuration issues name variables without exposing values', () => {

@@ -5,7 +5,7 @@ import { writeFileSync } from 'node:fs';
 import type { drive_v3 } from 'googleapis';
 import { migrateAtomicFile, type AtomicFileV1 } from '../src/types/atomicFile.js';
 import type { NoteWriteIntent } from '../src/db/recoveryContract.js';
-import { remoteNoteRowSchema } from '../src/types/noteWire.js';
+import { NOTE_LIMITS, remoteNoteRowSchema } from '../src/types/noteWire.js';
 import { noteContentHash } from '../src/lib/contentHash.js';
 import { startClientFixture } from './clientFixture.js';
 import { assertFixtureCleanup } from './clientFixtureSafety.js';
@@ -80,7 +80,7 @@ test('inactive fresh wire caller binds timestamps, persists before create, and r
     }
     await assert.rejects(call({ ...envelope, rows: [rows[0], rows[0]] }), /duplicate_note_ids/);
     await assert.rejects(call({ ...envelope, rows: Array.from({ length: 51 }, () => rows[0]) }));
-    await assert.rejects(call({ ...envelope, rows: [{ ...rows[0], body: 'x'.repeat(250001) }] }));
+    await assert.rejects(call({ ...envelope, rows: [{ ...rows[0], body: 'x'.repeat(NOTE_LIMITS.body + 1) }] }));
     await assert.rejects(call({ ...envelope, ignored: 'x'.repeat(4 * 1024 * 1024) }), /request_too_large/);
     assert.deepEqual(await snapshot(), baseline); assert.equal(allocations, 0);
     await collections.atomicUsers(db).updateOne({ _id: fixture.owner }, { $set: { noteLimit: 1 } });
