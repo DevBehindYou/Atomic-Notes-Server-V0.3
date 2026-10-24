@@ -3,13 +3,13 @@ import { z } from 'zod';
 import { todoItemSchema } from './atomicFile.js';
 
 /** Bounds shared by batch sync and the direct note endpoints. */
-export const NOTE_LIMITS = { title: 300, body: 131072, payload: 196608, wireBytes: 250000 } as const;
+export const NOTE_LIMITS = { title: 300, body: 262144, payload: 393216, wireBytes: 400000 } as const;
 
 type NoteContent = { title: string; body: string; items: unknown[]; encV: number; payload: string | null };
 
 /** Encrypted notes carry only ciphertext; plaintext and ciphertext must not mix. */
 export function refineNoteContent(content: NoteContent, ctx: z.RefinementCtx) {
-  if (Buffer.byteLength(JSON.stringify(content)) > NOTE_LIMITS.wireBytes) ctx.addIssue({ code: 'custom', message: 'Note exceeds 250 KB sync limit' });
+  if (Buffer.byteLength(JSON.stringify(content)) > NOTE_LIMITS.wireBytes) ctx.addIssue({ code: 'custom', message: 'Note exceeds 400 KB sync limit' });
   if (content.encV === 1 && (!content.payload || content.title || content.body || content.items.length)) {
     ctx.addIssue({ code: 'custom', message: 'Encrypted notes must contain only encrypted payload content' });
   }
