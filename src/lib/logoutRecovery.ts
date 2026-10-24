@@ -60,7 +60,7 @@ async function readLogoutRecoverySnapshot(db: Db, user: unknown, currentToken: s
 
 async function readLogoutRecoveryInSession(db: Db, user: unknown, currentToken: string,
   attempt: unknown, previousBinding: unknown, input: unknown, session: ClientSession) {
-  const userId = z.string().uuid().parse(user), attemptId = z.string().uuid().parse(attempt);
+  const userId = z.guid().parse(user), attemptId = z.guid().parse(attempt);
   const previousHash = digest.parse(previousBinding);
   const batches = z.array(logoutBatchSchema).min(1).max(LOGOUT_BOUNDS.batches).parse(input);
   if (!currentToken) throw denied('logout_recovery_current_session_invalid');

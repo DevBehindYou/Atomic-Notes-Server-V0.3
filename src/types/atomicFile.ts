@@ -1,3 +1,4 @@
+import { legacyDateTimeSchema } from '../lib/legacyDateTime.js';
 import { z } from 'zod';
 
 // v1 of the Atomic Notes file format — the JSON body of each `<uuid>.atomic`
@@ -15,17 +16,17 @@ export const todoItemSchema = z.union([
 
 export const atomicFileV1Schema = z.object({
   version: z.literal(1),
-  id: z.string().uuid(),
+  id: z.guid(),
   kind: z.enum(['text', 'todo']),
   title: z.string().max(300),
   body: z.string(),
   items: z.array(todoItemSchema).default([]),
   pinned: z.boolean().default(false),
   important: z.boolean().optional(),
-  encV: z.number().int().default(0),
+  encV: z.number().refine(Number.isInteger).default(0),
   payload: z.string().nullable().default(null),
-  createdAt: z.string().datetime(),
-  updatedAt: z.string().datetime(),
+  createdAt: legacyDateTimeSchema(),
+  updatedAt: legacyDateTimeSchema(),
 });
 
 export type AtomicFileV1 = z.infer<typeof atomicFileV1Schema>;

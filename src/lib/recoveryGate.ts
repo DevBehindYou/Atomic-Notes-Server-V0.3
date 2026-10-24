@@ -6,8 +6,8 @@ import { recoveryGateSchema, nextRecoveryRevision, type RecoveryGate } from '../
 
 /** Inactive: used only by generated-database acceptance fixtures. */
 type Lock = { _id: string; owner: string; expiresAt: Date };
-const leaseSchema = z.object({ userId: z.string().uuid(), token: z.string().uuid(),
-  wipeEpoch: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), expiresAt: z.date() }).strict();
+const leaseSchema = z.object({ userId: z.guid(), token: z.guid(),
+  wipeEpoch: z.number().refine(Number.isInteger).nonnegative().max(Number.MAX_SAFE_INTEGER), expiresAt: z.date() }).strict();
 export type RecoveryLease = z.infer<typeof leaseSchema>;
 export type RecoveryClock = () => Date;
 const defaultClock = () => new Date();
@@ -18,7 +18,7 @@ const locks = (db: Db) => db.collection<Lock>('operation_locks');
 
 /** Lease and persistent gate publish together; no production caller uses it. */
 export async function acquireRecoveryLease(db: Db, userId: string, clock: RecoveryClock = defaultClock): Promise<RecoveryLease> {
-  z.string().uuid().parse(userId);
+  z.guid().parse(userId);
   const token = randomUUID(), now = at(clock), expiresAt = z.date().parse(new Date(now.getTime() + 600000));
   try {
     return await withTransaction(async (session) => {

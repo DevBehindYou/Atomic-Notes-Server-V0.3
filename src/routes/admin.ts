@@ -1,3 +1,4 @@
+import { legacyDateTimeSchema } from '../lib/legacyDateTime.js';
 import { appendLedger } from '../lib/ledger.js';
 import { httpError } from '../lib/httpError.js';
 import { escapeRegex } from '../lib/validation.js';
@@ -84,9 +85,9 @@ admin.get('/user', async (c) => {
   });
 });
 
-const coinCursorSchema = z.object({ at: z.string().datetime(), id: z.string().min(1).max(100) });
+const coinCursorSchema = z.object({ at: legacyDateTimeSchema(), id: z.string().min(1).max(100) });
 admin.get('/coins', async (c) => {
-  const userId = z.string().uuid().parse(c.req.query('user_id'));
+  const userId = z.guid().parse(c.req.query('user_id'));
   const cursor = c.req.query('cursor');
   if (cursor && cursor.length > 512) return c.json({ error: 'invalid_cursor' }, 400);
   const decoded = cursor ? coinCursorSchema.parse(JSON.parse(Buffer.from(cursor, 'base64url').toString())) : null;
@@ -102,12 +103,12 @@ admin.get('/coins', async (c) => {
 const MAX_ADJUST = 100_000;
 // Coins and energy are whole numbers everywhere else (spend, convert, tiers); a fractional delta would leave a
 // wallet holding part of a coin.
-const adjustDelta = z.number().int().min(-MAX_ADJUST).max(MAX_ADJUST).default(0);
+const adjustDelta = z.number().refine(Number.isInteger).min(-MAX_ADJUST).max(MAX_ADJUST).default(0);
 const adjustSchema = z
   .object({
     email: z.string().email().optional(),
-    user_id: z.string().uuid().optional(),
-    request_id: z.string().uuid().optional(),
+    user_id: z.guid().optional(),
+    request_id: z.guid().optional(),
     coins_delta: adjustDelta,
     energy_delta: adjustDelta,
     note: z.string().max(120).optional(),
@@ -249,7 +250,7 @@ admin.get('/notifications', async (c) => {
       return c.json({ error: 'invalid_notification_cursor' }, 400);
     }
     try {
-      cursor = z.object({ created_at: z.string().datetime(), id: z.string().uuid() }).strict()
+      cursor = z.object({ created_at: legacyDateTimeSchema(), id: z.guid() }).strict()
         .parse(JSON.parse(Buffer.from(encodedCursor, 'base64url').toString('utf8')));
     } catch {
       return c.json({ error: 'invalid_notification_cursor' }, 400);
@@ -276,7 +277,7 @@ admin.get('/notifications', async (c) => {
 });
 
 const createNotificationSchema = z.object({
-  id: z.string().uuid().optional(),
+  id: z.guid().optional(),
   type: z.string().min(1),
   subject: z.string().min(1),
   description: z.string().min(1),
@@ -286,7 +287,7 @@ const createNotificationSchema = z.object({
   action_url: z.string().nullable().optional(),
   icon: z.string().nullable().optional(),
   target_audience: z.enum(AUDIENCES).optional(),
-  target_user_id: z.string().uuid().nullable().optional(),
+  target_user_id: z.guid().nullable().optional(),
   target_email: z.string().email().nullable().optional(),
   min_app_version: z.string().nullable().optional(),
   max_app_version: z.string().nullable().optional(),
@@ -354,7 +355,7 @@ admin.post('/notifications', async (c) => {
 });
 
 const patchNotificationBodySchema = z.object({
-  id: z.string().uuid(),
+  id: z.guid(),
   type: z.string().min(1).optional(),
   subject: z.string().min(1).optional(),
   description: z.string().min(1).optional(),
@@ -363,7 +364,7 @@ const patchNotificationBodySchema = z.object({
   action: z.string().nullable().optional(),
   action_url: z.string().nullable().optional(),
   icon: z.string().nullable().optional(),
-  target_user_id: z.string().uuid().nullable().optional(),
+  target_user_id: z.guid().nullable().optional(),
   min_app_version: z.string().nullable().optional(),
   max_app_version: z.string().nullable().optional(),
   expires_at: z.string().nullable().optional(),
@@ -442,7 +443,7 @@ admin.get('/controller/session-epoch', async (c) => {
   return c.json({ revoked_before: await controllerSessionEpoch(await getDb()) });
 });
 
-const epochSchema = z.object({ revoked_before: z.number().int().positive() });
+const epochSchema = z.object({ revoked_before: z.number().refine(Number.isInteger).positive() });
 
 admin.post('/controller/session-epoch', async (c) => {
   const { revoked_before: revokedBefore } = epochSchema.parse(await c.req.json());

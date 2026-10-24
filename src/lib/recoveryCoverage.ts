@@ -1,12 +1,13 @@
+import { legacyDateTimeSchema } from './legacyDateTime.js';
 import { z } from 'zod';
 import type { NoteWriteIntent } from '../db/recoveryContract.js';
 import type { SyncOperation } from './syncOperation.js';
 
-const version = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const version = z.number().refine(Number.isInteger).positive().max(Number.MAX_SAFE_INTEGER);
 export const classifiedResultSchema = z.union([
-  z.object({ id: z.string().uuid(), ok: z.literal(false), error: z.literal('note_conflict'), version }).strict(),
-  z.object({ id: z.string().uuid(), ok: z.literal(true), unchanged: z.literal(true), version,
-    updated_at: z.string().datetime() }).strict(),
+  z.object({ id: z.guid(), ok: z.literal(false), error: z.literal('note_conflict'), version }).strict(),
+  z.object({ id: z.guid(), ok: z.literal(true), unchanged: z.literal(true), version,
+    updated_at: legacyDateTimeSchema() }).strict(),
 ]);
 
 /** A result-only row must be an immutable admission classification, never an

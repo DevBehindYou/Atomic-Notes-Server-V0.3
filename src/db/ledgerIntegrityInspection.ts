@@ -4,7 +4,7 @@ import { energyLedgerSchema } from './collections.js';
 
 type WalletOrder = { _id: unknown; historyRetentionVersion?: unknown; historySequence?: unknown };
 type RowOrder = { userId?: unknown; historySequence?: unknown };
-const ownerId = z.string().uuid();
+const ownerId = z.guid();
 
 /** Diagnostic only. No values or validation errors are returned. Rows are a bounded 51-row marked-owner sample. */
 export function ledgerWalletIssues(wallet: WalletOrder, rows: readonly RowOrder[]): string[] {

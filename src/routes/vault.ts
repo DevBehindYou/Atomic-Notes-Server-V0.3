@@ -19,9 +19,9 @@ vault.use('*', requireAuth);
 
 const createVaultSchema = z.object({
   verifier: z.string().min(1),
-  kdfMemory: z.number().int().positive(),
-  kdfIterations: z.number().int().positive(),
-  kdfParallelism: z.number().int().positive(),
+  kdfMemory: z.number().refine(Number.isInteger).positive(),
+  kdfIterations: z.number().refine(Number.isInteger).positive(),
+  kdfParallelism: z.number().refine(Number.isInteger).positive(),
 });
 
 /** Lets a device check whether this account has a vault before prompting for a phrase. */

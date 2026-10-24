@@ -1,3 +1,4 @@
+import { legacyDateTimeSchema } from '../lib/legacyDateTime.js';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { getDb } from '../db/mongo.js';
@@ -91,7 +92,7 @@ energy.get('/', async (c) => {
     coin_request_replay: true, coin_details: details, history: historyToWire(history), limits: limitsToWire() });
 });
 
-const convertSchema = z.object({ coins: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), request_id: z.string().uuid().optional() });
+const convertSchema = z.object({ coins: z.number().refine(Number.isInteger).positive().max(Number.MAX_SAFE_INTEGER), request_id: z.guid().optional() });
 energy.post('/convert', async (c) => {
   const userId = c.get('userId') as string;
   const db = await getDb();
@@ -109,7 +110,7 @@ energy.post('/convert', async (c) => {
  * POST /energy/note-limit — buys the next tier of note capacity with coins, up to the ceiling.
  * [from_limit] is the limit the App showed, which makes a repeated call harmless.
  */
-const noteLimitSchema = z.object({ from_limit: z.number().int().nonnegative(), request_id: z.string().uuid().optional() });
+const noteLimitSchema = z.object({ from_limit: z.number().refine(Number.isInteger).nonnegative(), request_id: z.guid().optional() });
 energy.post('/note-limit', async (c) => {
   const userId = c.get('userId') as string;
   const db = await getDb();
@@ -123,7 +124,7 @@ energy.post('/note-limit', async (c) => {
   }
 });
 
-const cursorSchema = z.object({ at: z.string().datetime(), id: z.string().min(1).max(100) });
+const cursorSchema = z.object({ at: legacyDateTimeSchema(), id: z.string().min(1).max(100) });
 energy.get('/coins', async (c) => {
   const db = await getDb();
   const userId = c.get('userId') as string;

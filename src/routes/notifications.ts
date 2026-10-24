@@ -12,7 +12,7 @@ const notifications = new Hono();
 notifications.use('*', requireAuth);
 
 const appVersionSchema = z.string().max(32).regex(/^[0-9][0-9A-Za-z.+-]*$/).optional();
-const idSchema = z.string().uuid();
+const idSchema = z.guid();
 
 notifications.get('/', async (c) => {
   const appVersion = appVersionSchema.parse(c.req.query('app_version') || undefined);
