@@ -1,3 +1,4 @@
+import { legacyDateTimeSchema } from '../lib/legacyDateTime.js';
 import { z } from 'zod';
 import { todoItemSchema } from './atomicFile.js';
 
@@ -19,7 +20,7 @@ export function refineNoteContent(content: NoteContent, ctx: z.RefinementCtx) {
 
 // Matches the Flutter Note.toRemote + _sealRemote payload.
 export const remoteNoteRowSchema = z.object({
-  id: z.string().uuid(),
+  id: z.guid(),
   kind: z.enum(['text', 'todo']),
   title: z.string().max(NOTE_LIMITS.title),
   body: z.string().max(NOTE_LIMITS.body),
@@ -27,9 +28,9 @@ export const remoteNoteRowSchema = z.object({
   pinned: z.boolean(),
   important: z.boolean().optional(),
   deleted: z.boolean(),
-  created_at: z.string().datetime({ offset: true }),
-  updated_at: z.string().datetime({ offset: true }).optional(),
+  created_at: legacyDateTimeSchema({ offset: true }),
+  updated_at: legacyDateTimeSchema({ offset: true }).optional(),
   enc_v: z.union([z.literal(0), z.literal(1)]),
   payload: z.string().max(NOTE_LIMITS.payload).nullable(),
-  base_version: z.number().int().nonnegative().default(0),
+  base_version: z.number().refine(Number.isInteger).nonnegative().default(0),
 }).superRefine((row, ctx) => refineNoteContent({ ...row, encV: row.enc_v }, ctx));

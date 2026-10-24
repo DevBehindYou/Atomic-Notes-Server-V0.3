@@ -18,7 +18,7 @@ export const logoutAttempts = (db: Db) => db.collection<LogoutAttempt>('logout_a
 const boundSessions = (db: Db) => db.collection<BoundSession>('sessions');
 const denied = (code: string) => Object.assign(new Error(code), { status: 409 });
 const identity = (user: unknown, rawToken: string, attempt: unknown) => {
-  const userId = z.string().uuid().parse(user), attemptId = z.string().uuid().parse(attempt);
+  const userId = z.guid().parse(user), attemptId = z.guid().parse(attempt);
   if (!rawToken) throw denied('logout_session_invalid');
   return { userId, attemptId, id: `${userId}:${attemptId}`, sessionHash: createHash('sha256').update(rawToken).digest('hex') };
 };
@@ -97,7 +97,7 @@ export async function admitLogoutAttempt(db: Db, user: unknown, rawToken: string
 
 export async function openLogoutBatch(db: Db, user: unknown, rawToken: string, attempt: unknown,
   request: unknown, input: unknown, afterWrites?: () => Promise<void>) {
-  const ctx = identity(user, rawToken, attempt), requestId = z.string().uuid().parse(request);
+  const ctx = identity(user, rawToken, attempt), requestId = z.guid().parse(request);
   const rows = z.array(remoteNoteRowSchema).min(1).max(LOGOUT_BOUNDS.rowsPerBatch).parse(input);
   const fingerprint = logoutBatchFingerprint(rows);
   const wireBytes = Buffer.byteLength(JSON.stringify({ rows, requestId, mode: 'instant', logoutAttemptId: ctx.attemptId }));
@@ -134,7 +134,7 @@ export async function openLogoutBatch(db: Db, user: unknown, rawToken: string, a
 /** Authorize/replay before quota or Drive-token preflight, without charging. */
 export async function findLogoutBatch(db: Db, user: unknown, rawToken: string, attempt: unknown,
   request: unknown, input: unknown) {
-  const ctx = identity(user, rawToken, attempt), requestId = z.string().uuid().parse(request);
+  const ctx = identity(user, rawToken, attempt), requestId = z.guid().parse(request);
   const rows = z.array(remoteNoteRowSchema).min(1).max(LOGOUT_BOUNDS.rowsPerBatch).parse(input);
   const fingerprint = logoutBatchFingerprint(rows);
   const wireBytes = Buffer.byteLength(JSON.stringify({ rows, requestId, mode: 'instant', logoutAttemptId: ctx.attemptId }));
@@ -173,7 +173,7 @@ export async function abortLogoutAttempt(db: Db, user: unknown, rawToken: string
 }
 
 export async function settleLogoutBatch(db: Db, user: unknown, rawToken: string, attempt: unknown, request: unknown) {
-  const ctx = identity(user, rawToken, attempt), requestId = z.string().uuid().parse(request);
+  const ctx = identity(user, rawToken, attempt), requestId = z.guid().parse(request);
   return withTransaction(async session => {
     const seen = await liveSession(db, ctx, session, true), admitted = await activeAttempt(db, ctx, session);
     if (!admitted.batches.some(b => b.requestId === requestId)) throw denied('logout_batch_mismatch');

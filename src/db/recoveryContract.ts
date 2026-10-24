@@ -1,9 +1,9 @@
 import { z } from 'zod';
 
 /** Inactive contract: no production route/index initializer imports this module. */
-const safeInteger = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const safeInteger = z.number().refine(Number.isInteger).nonnegative().max(Number.MAX_SAFE_INTEGER);
 const positiveInteger = safeInteger.refine((value) => value > 0);
-const uuid = z.string().uuid();
+const uuid = z.guid();
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const fileId = z.string().min(1).max(256);
 const terminalReason = z.enum(['operation_closed', 'version_changed', 'owner_changed', 'wipe_changed',

@@ -12,7 +12,7 @@ export const revokeManagedSessionSchema = z.object({ session_handle: handleSchem
 const storedHashSchema = z.string().regex(/^[a-f0-9]{64}$/);
 
 function identity(user: unknown, rawToken: string) {
-  const userId = z.string().uuid().parse(user);
+  const userId = z.guid().parse(user);
   if (!rawToken) throw httpError('invalid_token', 401);
   return { userId, hash: createHash('sha256').update(rawToken).digest('hex') };
 }

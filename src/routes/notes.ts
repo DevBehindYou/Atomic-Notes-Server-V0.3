@@ -70,7 +70,7 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
     const token = authorization.slice(7), db = await getDb();
     const owner = await collections.sessions(db).findOne({ _id: createHash('sha256').update(token).digest('hex') }, { projection: { userId: 1 } });
     if (!owner) return c.json({ error: 'invalid_token' }, 401);
-    const { attemptId } = z.object({ attemptId: z.string().uuid() }).strict().parse(await c.req.json());
+    const { attemptId } = z.object({ attemptId: z.guid() }).strict().parse(await c.req.json());
     const release = await acquireOperationLock(db, `notes:${owner.userId}`, 15000);
     try {
       const result = await completeLogoutAttempt(db, owner.userId, token, attemptId);
@@ -82,7 +82,7 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
   // No abandoned operation is settled, no wallet initialized, no session touched.
   notesRoute.post('/logout-attempt/recovery-status', async c => {
     if (!logoutSync) return c.json({ error: 'logout_sync_unavailable' }, 404);
-    const { attemptId, previousSessionHash, batches } = z.object({ attemptId: z.string().uuid(),
+    const { attemptId, previousSessionHash, batches } = z.object({ attemptId: z.guid(),
       previousSessionHash: z.string().regex(/^[a-f0-9]{64}$/),
       batches: z.array(logoutBatchSchema).min(1).max(LOGOUT_BOUNDS.batches) }).strict()
       .parse(await readLogoutRecoveryBody(c.req.raw));
@@ -93,7 +93,7 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
   // attempt. This also precedes the legacy write/reconciliation middleware.
   notesRoute.post('/logout-attempt/recovery-receipts', async c => {
     if (!logoutSync) return c.json({ error: 'logout_sync_unavailable' }, 404);
-    const { attemptId, previousSessionHash, batches } = z.object({ attemptId: z.string().uuid(),
+    const { attemptId, previousSessionHash, batches } = z.object({ attemptId: z.guid(),
       previousSessionHash: z.string().regex(/^[a-f0-9]{64}$/),
       batches: z.array(logoutBatchSchema).min(1).max(LOGOUT_BOUNDS.batches) }).strict()
       .parse(await readLogoutRecoveryBody(c.req.raw));
@@ -104,7 +104,7 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
   // refuse recovery rather than settle/refund abandoned work as a side effect.
   notesRoute.post('/logout-attempt/recovery-commit', async c => {
     if (!logoutSync) return c.json({ error: 'logout_sync_unavailable' }, 404);
-    const { attemptId, previousSessionHash, batches } = z.object({ attemptId: z.string().uuid(),
+    const { attemptId, previousSessionHash, batches } = z.object({ attemptId: z.guid(),
       previousSessionHash: z.string().regex(/^[a-f0-9]{64}$/),
       batches: z.array(logoutBatchSchema).min(1).max(LOGOUT_BOUNDS.batches) }).strict()
       .parse(await readLogoutRecoveryBody(c.req.raw));
@@ -139,7 +139,7 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
 
   notesRoute.post('/logout-attempt', async c => {
     if (!logoutSync) return c.json({ error: 'logout_sync_unavailable' }, 404);
-    const { attemptId, batches } = z.object({ attemptId: z.string().uuid(),
+    const { attemptId, batches } = z.object({ attemptId: z.guid(),
       batches: z.array(logoutBatchSchema).min(1).max(LOGOUT_BOUNDS.batches) }).strict().parse(await c.req.json());
     const result = await admitLogoutAttempt(await getDb(), c.get('userId'), c.get('sessionToken'), attemptId, batches);
     return c.json({ attemptId: result.attemptId, funding: result.funding, batches: result.batches.length,
@@ -147,7 +147,7 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
   });
   notesRoute.post('/logout-attempt/abort', async c => {
     if (!logoutSync) return c.json({ error: 'logout_sync_unavailable' }, 404);
-    const { attemptId } = z.object({ attemptId: z.string().uuid() }).strict().parse(await c.req.json());
+    const { attemptId } = z.object({ attemptId: z.guid() }).strict().parse(await c.req.json());
     const result = await abortLogoutAttempt(await getDb(), c.get('userId'), c.get('sessionToken'), attemptId);
     return c.json({ ok: true, attemptId: result.attemptId, state: result.state });
   });
@@ -255,7 +255,7 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
     const pushStarted = performance.now();
     const userId = c.get('userId') as string;
     const db = await getDb();
-    const { rows, requestId, mode, logoutAttemptId } = z.object({ rows: z.array(remoteNoteRowSchema).max(MAX_PUSH_ROWS), requestId: z.string().uuid(), mode: z.enum(['standard', 'instant']).default('standard'), logoutAttemptId: z.string().uuid().optional() }).parse(await c.req.json());
+    const { rows, requestId, mode, logoutAttemptId } = z.object({ rows: z.array(remoteNoteRowSchema).max(MAX_PUSH_ROWS), requestId: z.guid(), mode: z.enum(['standard', 'instant']).default('standard'), logoutAttemptId: z.guid().optional() }).parse(await c.req.json());
     if (logoutAttemptId && (!logoutSync || mode !== 'instant')) return c.json({ error: 'logout_sync_unavailable' }, 409);
     if (rows.length === 0) return c.json({ ok: true, results: [] });
     if (new Set(rows.map((row) => row.id)).size !== rows.length) {
@@ -495,7 +495,7 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
     const db = await getDb();
     const since = c.req.query('since');
     const afterValue = c.req.query('after');
-    const after = afterValue === undefined ? null : z.coerce.number().int().nonnegative().parse(afterValue);
+    const after = afterValue === undefined ? null : z.coerce.number().refine(Number.isInteger).nonnegative().parse(afterValue);
     const encOnly = c.req.query('encOnly') === 'true';
 
     if (after === null && since && !Number.isFinite(new Date(since).getTime())) return c.json({ error: 'invalid_since' }, 400);

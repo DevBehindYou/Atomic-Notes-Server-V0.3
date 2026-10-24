@@ -11,7 +11,7 @@ import type { Db } from 'mongodb';
 // users — new in this backend; Supabase auth.users had no equivalent app table
 // ---------------------------------------------------------------------------
 export const userSchema = z.object({
-  _id: z.string().uuid(),
+  _id: z.guid(),
   email: z.string().email(),
   displayName: z.string().nullable(),
   createdAt: z.date(),
@@ -24,8 +24,8 @@ export type UserDoc = z.infer<typeof userSchema>;
 // think about, because Supabase's own auth.users handled sign-in
 // ---------------------------------------------------------------------------
 export const googleAccountSchema = z.object({
-  _id: z.string().uuid(),
-  userId: z.string().uuid(),
+  _id: z.guid(),
+  userId: z.guid(),
   googleAccountId: z.string(),
   encryptedAccessToken: z.string(),
   encryptedRefreshToken: z.string(),
@@ -45,13 +45,13 @@ export type GoogleAccountDoc = z.infer<typeof googleAccountSchema>;
 // ---------------------------------------------------------------------------
 export const sessionSchema = z.object({
   _id: z.string(), // hex-encoded SHA-256 of the raw session token
-  userId: z.string().uuid(),
+  userId: z.guid(),
   createdAt: z.date(),
   expiresAt: z.date(),
   revoked: z.boolean().default(false),
   userAgent: z.string().nullable().optional(),
   logoutAttemptId: z.string().optional(),
-  logoutAttemptRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  logoutAttemptRevision: z.number().refine(Number.isInteger).nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
 });
 export type SessionDoc = z.infer<typeof sessionSchema>;
 
@@ -81,19 +81,19 @@ export type SessionDoc = z.infer<typeof sessionSchema>;
 //                                                      — corrected to the real name)
 // ---------------------------------------------------------------------------
 export const atomicUserSchema = z.object({
-  _id: z.string().uuid(), // == userId
+  _id: z.guid(), // == userId
   username: z.string().default(''),
-  noteLimit: z.number().int().default(30),
+  noteLimit: z.number().refine(Number.isInteger).default(30),
   historyRetentionVersion: z.literal(1).optional(),
-  historySequence: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
-  historyRevision: z.number().int().nonnegative().optional(),
+  historySequence: z.number().refine(Number.isInteger).nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  historyRevision: z.number().refine(Number.isInteger).nonnegative().optional(),
   coinLotsVersion: z.literal(1).optional(),
-  coinMutationRevision: z.number().int().optional(),
+  coinMutationRevision: z.number().refine(Number.isInteger).optional(),
   coinPolicyActivatedAt: z.date().optional(),
-  coins: z.number().int().default(5), // welcome gift, new wallets only
-  energy: z.number().int().default(0),
-  logoutFundingRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
-  energyCap: z.number().int().default(120),
+  coins: z.number().refine(Number.isInteger).default(5), // welcome gift, new wallets only
+  energy: z.number().refine(Number.isInteger).default(0),
+  logoutFundingRevision: z.number().refine(Number.isInteger).nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  energyCap: z.number().refine(Number.isInteger).default(120),
   lastDailyGrantAt: z.date().nullable().default(null),
   lastStandardSyncAt: z.date().nullable().default(null),
   createdAt: z.date(), // needed for the Controller dashboard's "new in 7 days" stat — missing in this backend's first pass
@@ -119,14 +119,14 @@ export type AtomicUserDoc = z.infer<typeof atomicUserSchema>;
 // ---------------------------------------------------------------------------
 export const energyTxKind = z.enum(['daily_grant', 'convert', 'spend', 'purchase', 'admin_adjust']);
 export const energyLedgerSchema = z.object({
-  historySequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
-  _id: z.string().uuid(),
-  userId: z.string().uuid(),
+  historySequence: z.number().refine(Number.isInteger).positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  _id: z.guid(),
+  userId: z.guid(),
   kind: energyTxKind,
-  coinsDelta: z.number().int(),
-  energyDelta: z.number().int(),
-  resultingCoins: z.number().int(),
-  resultingEnergy: z.number().int(),
+  coinsDelta: z.number().refine(Number.isInteger),
+  energyDelta: z.number().refine(Number.isInteger),
+  resultingCoins: z.number().refine(Number.isInteger),
+  resultingEnergy: z.number().refine(Number.isInteger),
   note: z.string().nullable(),
   reason: z.string().optional(),
   coinOperationId: z.string().optional(),
@@ -153,13 +153,13 @@ export type EnergyLedgerDoc = z.infer<typeof energyLedgerSchema>;
 //   enc_v                -> encV
 // ---------------------------------------------------------------------------
 export const vaultSchema = z.object({
-  _id: z.string().uuid(), // == userId
+  _id: z.guid(), // == userId
   verifier: z.string(),
   kdf: z.literal('argon2id'),
-  kdfMemory: z.number().int(),
-  kdfIterations: z.number().int(),
-  kdfParallelism: z.number().int(),
-  encV: z.number().int(),
+  kdfMemory: z.number().refine(Number.isInteger),
+  kdfIterations: z.number().refine(Number.isInteger),
+  kdfParallelism: z.number().refine(Number.isInteger),
+  encV: z.number().refine(Number.isInteger),
   createdAt: z.date(),
 });
 export type VaultDoc = z.infer<typeof vaultSchema>;
@@ -185,9 +185,9 @@ export type VaultDoc = z.infer<typeof vaultSchema>;
 //   (title/body/items/payload live in Drive, not here)
 // ---------------------------------------------------------------------------
 export const noteSchema = z.object({
-  _id: z.string().uuid(),
-  userId: z.string().uuid(),
-  folderId: z.string().uuid().nullable(),
+  _id: z.guid(),
+  userId: z.guid(),
+  folderId: z.guid().nullable(),
   kind: z.enum(['text', 'todo']),
   pinned: z.boolean().default(false),
   important: z.boolean().optional(),
@@ -195,8 +195,8 @@ export const noteSchema = z.object({
   encV: z.union([z.literal(0), z.literal(1)]).default(0),
   driveFileId: z.string(),
   driveRevisionId: z.string().nullable(),
-  localVersion: z.number().int().default(1),
-  syncSequence: z.number().int().optional(),
+  localVersion: z.number().refine(Number.isInteger).default(1),
+  syncSequence: z.number().refine(Number.isInteger).optional(),
   // Fingerprint of the content last written to Drive (see lib/contentHash.ts). Absent on notes written before it existed.
   contentHash: z.string().optional(),
   generationFormat: z.literal(1).optional(),
@@ -213,11 +213,11 @@ export type NoteDoc = z.infer<typeof noteSchema>;
 // Drive folder-organization feature described there.
 // ---------------------------------------------------------------------------
 export const folderSchema = z.object({
-  _id: z.string().uuid(),
-  userId: z.string().uuid(),
+  _id: z.guid(),
+  userId: z.guid(),
   driveFolderId: z.string(),
   name: z.string(),
-  parentId: z.string().uuid().nullable(),
+  parentId: z.guid().nullable(),
   createdAt: z.date(),
   updatedAt: z.date(),
 });
@@ -228,11 +228,11 @@ export type FolderDoc = z.infer<typeof folderSchema>;
 // platform: security/account-relevant events, queryable by user or event type.
 // ---------------------------------------------------------------------------
 export const logSchema = z.object({
-  _id: z.string().uuid(),
-  userId: z.string().uuid().nullable(),
+  _id: z.guid(),
+  userId: z.guid().nullable(),
   event: z.string(),
   level: z.enum(['info', 'warn', 'error']).default('info'),
-  meta: z.record(z.any()).default({}),
+  meta: z.record(z.string(), z.any()).default({}),
   createdAt: z.date(),
 });
 export type LogDoc = z.infer<typeof logSchema>;
@@ -246,7 +246,7 @@ export type LogDoc = z.infer<typeof logSchema>;
 // `notification_recipients` (see lib/notificationFeed.ts).
 // ---------------------------------------------------------------------------
 export const notificationSchema = z.object({
-  _id: z.string().uuid(),
+  _id: z.guid(),
   type: z.string(),
   subject: z.string(),
   description: z.string(),
@@ -256,7 +256,7 @@ export const notificationSchema = z.object({
   actionUrl: z.string().nullable().default(null),
   icon: z.string().nullable().default(null),
   targetAudience: z.string().nullable().default('all'),
-  targetUserId: z.string().uuid().nullable().default(null),
+  targetUserId: z.guid().nullable().default(null),
   minAppVersion: z.string().nullable().default(null),
   maxAppVersion: z.string().nullable().default(null),
   dismissible: z.boolean().default(true),

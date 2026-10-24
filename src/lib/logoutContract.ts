@@ -6,17 +6,17 @@ import { remoteNoteRowSchema } from '../types/noteWire.js';
 
 /** Matches current App batching. Too much work must refuse logout, never drop it. */
 export const LOGOUT_BOUNDS = { batches: 5, rowsPerBatch: 50, bytesPerBatch: 2_500_000 } as const;
-const safePositive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const safePositive = z.number().refine(Number.isInteger).positive().max(Number.MAX_SAFE_INTEGER);
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 export const logoutBatchSchema = z.object({
-  requestId: z.string().uuid(), fingerprint: digest,
-  rowIds: z.array(z.string().uuid()).min(1).max(LOGOUT_BOUNDS.rowsPerBatch),
+  requestId: z.guid(), fingerprint: digest,
+  rowIds: z.array(z.guid()).min(1).max(LOGOUT_BOUNDS.rowsPerBatch),
   wireBytes: safePositive.max(LOGOUT_BOUNDS.bytesPerBatch),
 }).strict().superRefine((batch, ctx) => {
   if (new Set(batch.rowIds).size !== batch.rowIds.length) ctx.addIssue({ code: 'custom', message: 'duplicate_logout_note' });
 });
 export const logoutAttemptSchema = z.object({
-  _id: z.string(), format: z.literal(1), userId: z.string().uuid(), attemptId: z.string().uuid(),
+  _id: z.string(), format: z.literal(1), userId: z.guid(), attemptId: z.guid(),
   sessionHash: digest, funding: z.enum(['paid', 'emergency']),
   batches: z.array(logoutBatchSchema).min(1).max(LOGOUT_BOUNDS.batches),
   state: z.enum(['prepared', 'completed', 'aborted']), createdAt: z.date(), updatedAt: z.date(),

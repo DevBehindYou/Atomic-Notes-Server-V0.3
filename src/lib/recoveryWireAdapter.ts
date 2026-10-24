@@ -13,9 +13,9 @@ import { withRecoveryFence, type RecoveryLease } from './recoveryGate.js';
 import { beginRecoverySync } from './recoveryAdmission.js';
 import { resumeRecoveryOperation, type RecoveryResumeResult } from './recoveryResume.js';
 
-const envelopeSchema = z.object({ requestId: z.string().uuid(),
+const envelopeSchema = z.object({ requestId: z.guid(),
   rows: z.array(remoteNoteRowSchema).min(1).max(50),
-  mode: z.enum(['standard', 'instant']).default('standard'), logoutAttemptId: z.string().uuid().optional() });
+  mode: z.enum(['standard', 'instant']).default('standard'), logoutAttemptId: z.guid().optional() });
 const refuse = (code: string) => Object.assign(new Error(code), { status: 409 });
 
 /** Inactive caller adapter: only fresh, live plaintext/opaque encrypted rows.
@@ -26,7 +26,7 @@ const refuse = (code: string) => Object.assign(new Error(code), { status: 409 })
  */
 export async function runFreshRecoveryPush(db: Db, authenticatedOwner: string, lease: RecoveryLease,
   input: unknown, drive: drive_v3.Drive, parentId: string): Promise<RecoveryResumeResult> {
-  if (z.string().uuid().parse(authenticatedOwner) !== lease.userId) throw refuse('recovery_owner_mismatch');
+  if (z.guid().parse(authenticatedOwner) !== lease.userId) throw refuse('recovery_owner_mismatch');
   // Bound serialized input before schema strips unknown keys; raw HTTP bytes
   // (including whitespace) require the trusted caller's existing body limiter.
   if (Buffer.byteLength(JSON.stringify(input) ?? '') > 4 * 1024 * 1024) throw Object.assign(new Error('request_too_large'), { status: 413 });

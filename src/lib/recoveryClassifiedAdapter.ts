@@ -14,8 +14,8 @@ import { beginRecoverySync } from './recoveryAdmission.js';
 import { assertRecoveryCoverage, classifiedResultSchema } from './recoveryCoverage.js';
 import { resumeRecoveryOperation, type RecoveryResumeResult } from './recoveryResume.js';
 
-const envelopeSchema = z.object({ requestId: z.string().uuid(), rows: z.array(remoteNoteRowSchema).min(1).max(50),
-  mode: z.enum(['standard', 'instant']).default('standard'), logoutAttemptId: z.string().uuid().optional() });
+const envelopeSchema = z.object({ requestId: z.guid(), rows: z.array(remoteNoteRowSchema).min(1).max(50),
+  mode: z.enum(['standard', 'instant']).default('standard'), logoutAttemptId: z.guid().optional() });
 const refuse = (code: string) => Object.assign(new Error(code), { status: 409 });
 
 /** Inactive initial-classification caller. Trusted caller authenticates owner,
@@ -25,7 +25,7 @@ const refuse = (code: string) => Object.assign(new Error(code), { status: 409 })
  */
 export async function runClassifiedRecoveryPush(db: Db, authenticatedOwner: string, lease: RecoveryLease,
   input: unknown, drive: drive_v3.Drive, parentId: string): Promise<RecoveryResumeResult> {
-  if (z.string().uuid().parse(authenticatedOwner) !== lease.userId) throw refuse('recovery_owner_mismatch');
+  if (z.guid().parse(authenticatedOwner) !== lease.userId) throw refuse('recovery_owner_mismatch');
   // Serialized-object bound only; trusted HTTP caller checks raw bytes separately.
   if (Buffer.byteLength(JSON.stringify(input) ?? '') > 4 * 1024 * 1024) throw Object.assign(new Error('request_too_large'), { status: 413 });
   const { requestId, rows, mode, logoutAttemptId } = envelopeSchema.parse(input);

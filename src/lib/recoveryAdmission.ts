@@ -16,7 +16,7 @@ import { assertRecoveryCoverage, classifiedResultSchema } from './recoveryCovera
 type Operation = SyncOperation & { recoveryFormat: 1 };
 export async function beginRecoverySync(db: Db, lease: RecoveryLease, request: unknown, input: unknown,
   selectedMode: unknown, manifests: unknown, afterWrites?: (session: ClientSession) => Promise<void>, classifications: unknown = []) {
-  const requestId = z.string().uuid().parse(request);
+  const requestId = z.guid().parse(request);
   const rows = z.array(remoteNoteRowSchema).min(1).max(50).parse(input);
   const mode = z.enum(['standard', 'instant']).parse(selectedMode);
   const supplied = z.array(z.unknown()).max(50).parse(manifests);

@@ -14,7 +14,7 @@ foldersRoute.get('/', async (c) => {
   return c.json(rows);
 });
 
-const createFolderSchema = z.object({ name: z.string().min(1).max(200), parentId: z.string().uuid().optional() });
+const createFolderSchema = z.object({ name: z.string().min(1).max(200), parentId: z.guid().optional() });
 
 foldersRoute.post('/', async (c) => {
   createFolderSchema.parse(await c.req.json());
