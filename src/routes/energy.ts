@@ -17,6 +17,7 @@ import {
 } from '../lib/energy.js';
 
 import { coinDetails, readCoinWallet } from '../lib/coinLots.js';
+import { readHeldRefundEnergy } from '../lib/refundCredit.js';
 
 const energy = new Hono();
 energy.use('*', requireAuth);
@@ -88,7 +89,8 @@ energy.get('/', async (c) => {
   const wallet = await readCoinWallet(db, userId);
   const history = await energyHistory(db, userId);
   const details = wallet?.coinLotsVersion === 1 ? await coinDetails(db, userId) : null;
-  return c.json({ wallet: walletToWire(wallet && details?.enabled ? { ...wallet, coins: details.coins! } : wallet),
+  const projection = walletToWire(wallet && details?.enabled ? { ...wallet, coins: details.coins! } : wallet);
+  return c.json({ wallet: wallet && projection ? { ...projection, held_refund_energy: readHeldRefundEnergy(wallet) } : null,
     coin_request_replay: true, coin_details: details, history: historyToWire(history), limits: limitsToWire() });
 });
 

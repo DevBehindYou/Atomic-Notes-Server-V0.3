@@ -99,6 +99,14 @@ jobs:
           path: ci-capped-refund-proof.json
           if-no-files-found: ignore
           retention-days: 7
+      - name: Upload sanitized refund credit reader proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitized-refund-credit-reader-proof
+          path: ci-refund-credit-reader-proof.json
+          if-no-files-found: ignore
+          retention-days: 1
       - name: Remove disposable MongoDB
         # Test artifacts never contain raw assertions or payloads.
         if: always()
