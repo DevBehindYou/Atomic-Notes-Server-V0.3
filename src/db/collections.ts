@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { Db } from 'mongodb';
+import { refundCreditMetadataSchema } from '../lib/refundCredit.js';
 
 // Every schema below is annotated with the real Supabase/Postgres column names
 // it replaces (read directly from the live app's lib/database and lib/security
@@ -80,7 +81,7 @@ export type SessionDoc = z.infer<typeof sessionSchema>;
 //                                                      guessed `lastStandardSyncChargeAt`
 //                                                      — corrected to the real name)
 // ---------------------------------------------------------------------------
-export const atomicUserSchema = z.object({
+export const atomicUserSchema = refundCreditMetadataSchema.safeExtend({
   _id: z.guid(), // == userId
   username: z.string().default(''),
   noteLimit: z.number().refine(Number.isInteger).default(30),

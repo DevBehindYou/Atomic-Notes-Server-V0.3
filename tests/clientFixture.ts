@@ -64,6 +64,7 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
     const { createNotesRoute } = await import('../src/routes/notes.js');
     const { default: authRoute } = await import('../src/routes/auth.js');
     const { default: adminRoute } = await import('../src/routes/admin.js');
+    const { default: energyRoute } = await import('../src/routes/energy.js');
     const { registerErrorHandler } = await import('../src/middleware/errorHandler.js');
     await ensureIndexes(db);
     const owner = randomUUID(), other = randomUUID(), batchOwner = randomUUID(), encryptedOwner = randomUUID();
@@ -157,6 +158,7 @@ export async function startClientFixture(uri: string | undefined, selectedDataba
     // sign-in routes are not invoked by this synthetic-session harness.
     app.route('/api/auth', authRoute);
     app.route('/api/admin', adminRoute);
+    app.route('/api/energy', energyRoute);
     // Read-only fixture diagnostics. No such endpoints exist in production.
     app.get('/__fixture/ready', (c) => c.json({ owner, other, batchOwner, encryptedOwner, database }));
     // Fault controls exist only in this guarded loopback test assembly.
