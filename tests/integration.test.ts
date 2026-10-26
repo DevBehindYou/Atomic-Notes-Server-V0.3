@@ -353,7 +353,9 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
         assert.equal(ready.orderingIndexReady, true); assert.equal(ready.sequenceOrderingIndexReady, true);
         assert.equal(ready.activationReady, false, 'usable indexes do not authorize activation');
         assert.equal(ready.rows, result.rows); assert.equal(ready.orphanRows, result.orphanRows);
-        assert.deepEqual(ready.blockers, ['orphan_history_requires_review']);
+        assert.deepEqual(ready.blockers, result.blockers.filter(blocker =>
+          blocker !== 'ordering_index_requires_separate_review' && blocker !== 'sequence_ordering_index_requires_separate_review'),
+        'creating ordering indexes removes only their blockers, preserving prior provenance findings');
         assert.deepEqual(await collections.energyLedger(db).indexes(), readyIndexes);
         assert.deepEqual(await collections.energyLedger(db).find({}).sort({ _id: 1 }).toArray(), before);
         assert.deepEqual(await collections.atomicUsers(db).findOne({ _id: account.id }), wallet);

@@ -7,6 +7,17 @@ const targets = [
 ] as const;
 const oldTtlSeconds = 30 * 24 * 60 * 60;
 export type RetentionPlan = { database: string; drops: { collection: string; name: string }[] };
+type RetentionIndex = { name?: string; key: Record<string, unknown>; expireAfterSeconds?: number;
+  partialFilterExpression?: unknown; unique?: boolean; sparse?: boolean; hidden?: boolean; collation?: unknown };
+
+/** Shared exact recognition for the existing transition and count-only catalog inspection. */
+export function isLegacySyncRetentionIndex(collection: string, index: RetentionIndex): boolean {
+  const target = targets.find(candidate => candidate.collection === collection);
+  return !!target && index.name === target.name && isDeepStrictEqual(index.key, target.key)
+    && index.expireAfterSeconds === oldTtlSeconds
+    && isDeepStrictEqual(index.partialFilterExpression, target.partial)
+    && !index.unique && !index.sparse && !index.hidden && !index.collation;
+}
 
 /** Read-only preflight of both collections. Unexpected TTL configuration requires review. */
 export async function inspectSyncRetention(db: Db): Promise<RetentionPlan> {
@@ -16,10 +27,7 @@ export async function inspectSyncRetention(db: Db): Promise<RetentionPlan> {
     if (!(await db.listCollections({ name: target.collection }, { nameOnly: true }).hasNext())) continue;
     for (const index of await db.collection(target.collection).indexes()) {
       if (index.expireAfterSeconds === undefined) continue;
-      if (index.name !== target.name || !isDeepStrictEqual(index.key, target.key)
-        || index.expireAfterSeconds !== oldTtlSeconds
-        || !isDeepStrictEqual(index.partialFilterExpression, target.partial)
-        || index.unique || index.sparse || index.hidden || index.collation) {
+      if (!isLegacySyncRetentionIndex(target.collection, index)) {
         throw new Error('sync_retention_index_drift');
       }
       drops.push({ collection: target.collection, name: target.name });
