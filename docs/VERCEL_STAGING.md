@@ -2,8 +2,11 @@
 
 This prepares the App API for a **new** project named `atomic-notes-app-server-staging`.
 It does not configure or deploy the existing production project. The separately
-deployed WebAppServer is a different application and must use a different Vercel
-project and its own database, OAuth client, and secrets.
+deployed WebAppServer uses a different Vercel project. Its current gateway
+foundation needs no database, OAuth credentials or application secrets. Future
+browser-session configuration is separate, while note and wallet mutations must
+delegate to the reviewed AppServer authority rather than introducing a competing
+database/financial writer.
 
 ## Project settings
 
@@ -53,7 +56,8 @@ or admin key belongs in an APK or browser bundle.
 Resource isolation cannot be established by checking variable formats. Before
 the first functional login, the owner confirms the cluster, database permissions,
 OAuth project/client, and every secret are independent of real production and
-the other staging application. Use dedicated Google **test accounts** with no
+any unrelated application. Do not create a duplicate WebApp wallet or note store
+as a shortcut to deployment. Use dedicated Google **test accounts** with no
 real notes, and add them as test users on the staging consent screen. Keep the
 current scopes (`openid`, `email`, `profile`, `drive.file`); do not broaden Drive
 access. Native testing also requires matching staging Android/iOS OAuth client
