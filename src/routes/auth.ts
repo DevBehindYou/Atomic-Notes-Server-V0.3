@@ -31,6 +31,16 @@ export async function completeGoogleLogin(
   userAgent: string | null | undefined, setupFolders = ensureAppFolders, profileOf = fetchGoogleProfile,
 ) {
   if (!tokens.access_token) return { error: 'incomplete_token_response' as const };
+  // Older exchanges may omit scope metadata. Reject only an explicit grant list
+  // without Drive write access, before identity lookup or any account mutation.
+  if (tokens.scope !== undefined) {
+    const scopes = new Set(tokens.scope.split(/\s+/));
+    // Full Drive is accepted for existing grants; new consent still requests drive.file only.
+    if (!scopes.has('https://www.googleapis.com/auth/drive.file') && !scopes.has('https://www.googleapis.com/auth/drive')) {
+      return { error: 'drive_permission_required' as const,
+        hint: 'Allow access to the specific Google Drive files used with this app, then sign in again.' };
+    }
+  }
   // The ID token is the normal source of identity. If Google left it out of the exchange, the
   // userinfo endpoint answers for the access token this Server itself just obtained with its secret.
   const payload = tokens.id_token
