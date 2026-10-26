@@ -19,6 +19,91 @@ import { isInvalidGrant } from '../src/lib/googleOAuth';
 import { httpError } from '../src/lib/httpError';
 import { SUPPORT_URL, WELCOME_NOTIFICATIONS } from '../src/lib/welcomeNotifications';
 import { retentionArguments } from '../src/db/syncRetention';
+import * as provenanceInspection from '../src/db/ledgerProvenanceInspection';
+
+test('provenance classifies only explicit references and accepts no-op receipts', () => {
+  const owner = randomUUID(), at = new Date();
+  const wallet = { _id: owner, coins: 5, energy: 0, createdAt: at };
+  const receipt = { _id: `${owner}:request`, userId: owner, requestId: 'request', fingerprint: 'private-fingerprint',
+    allocations: [], result: wallet, createdAt: at };
+  const empty = { total: 0, owned: 0 };
+  assert.deepEqual(provenanceInspection.coinReceiptIssues(receipt, true, empty), []);
+  assert.deepEqual(provenanceInspection.coinReceiptIssues({ ...receipt, allocations: [{ lotId: 'absent', amount: 1 }] }, true, empty),
+    ['missing_allocation_lot']);
+  assert.deepEqual(provenanceInspection.coinReceiptIssues({ ...receipt, allocations: [{ lotId: 'foreign', amount: 1 }] }, false, { total: 1, owned: 0 }),
+    ['orphan_receipt_owner', 'foreign_allocation_lot']);
+  assert.ok(provenanceInspection.coinReceiptIssues({ ...receipt, allocations: 'private-malformed' }, true, empty).includes('malformed_receipt'));
+  assert.ok(provenanceInspection.coinReceiptIssues({ ...receipt, result: { ...wallet, _id: randomUUID() } }, true, empty).includes('malformed_receipt'));
+  const ledger = { _id: randomUUID(), userId: owner, kind: 'admin_adjust', coinsDelta: 0, energyDelta: 0,
+    resultingCoins: 5, resultingEnergy: 0, note: null, createdAt: at };
+  assert.deepEqual(provenanceInspection.ledgerProvenanceIssues(ledger, empty, empty), ['no_explicit_references']);
+  assert.deepEqual(provenanceInspection.ledgerProvenanceIssues({ ...ledger, coinOperationId: receipt._id, lotIds: ['lot'] },
+    { total: 1, owned: 1 }, { total: 1, owned: 1 }), []);
+  assert.deepEqual(provenanceInspection.ledgerProvenanceIssues({ ...ledger, coinOperationId: 'absent', lotIds: ['foreign'] },
+    empty, { total: 1, owned: 0 }), ['missing_referenced_operation', 'foreign_referenced_lot']);
+  assert.deepEqual(provenanceInspection.ledgerProvenanceIssues({ ...ledger, lotIds: ['lot', 'lot'] },
+    empty, { total: 1, owned: 1 }), [], 'repeating a reference does not mean a record is missing');
+  assert.deepEqual(provenanceInspection.coinReceiptIssues({ ...receipt,
+    allocations: [{ lotId: 'lot', amount: 1 }, { lotId: 'lot', amount: 1 }] }, true, { total: 1, owned: 1 }), []);
+  assert.deepEqual(provenanceInspection.ledgerProvenanceIssues({ ...ledger, lotIds: [null, {}] }, empty, empty),
+    ['invalid_provenance_row', 'no_explicit_references']);
+});
+
+test('provenance preserves opening and unclassified sources without inventing receipt links', () => {
+  const owner = randomUUID(), at = new Date(), empty = { total: 0, owned: 0 };
+  const lot = { _id: 'lot', userId: owner, source: 'legacy', operationId: `${owner}:opening`,
+    amount: 5, remaining: 5, creditedAt: at, expiresAt: null };
+  assert.deepEqual(provenanceInspection.coinLotIssues(lot, true, empty), ['unclassified_source', 'opening_receipt_not_required']);
+  assert.deepEqual(provenanceInspection.coinLotIssues({ ...lot, source: 'controller' }, true, empty),
+    ['unclassified_source', 'missing_referenced_operation']);
+  assert.deepEqual(provenanceInspection.coinLotIssues({ ...lot, source: 'welcome' }, true, empty), ['opening_receipt_not_required']);
+  assert.deepEqual(provenanceInspection.coinLotIssues({ ...lot, source: 'welcome' }, true, { total: 1, owned: 0 }),
+    ['foreign_referenced_operation'], 'an existing opening reference still needs the correct owner');
+  assert.ok(provenanceInspection.coinLotIssues({ ...lot, remaining: 'private-value' }, true, empty).includes('malformed_lot'));
+  assert.ok(provenanceInspection.coinLotIssues({ ...lot, remaining: 6 }, true, empty).includes('malformed_lot'));
+  assert.ok(provenanceInspection.coinLotIssues({ ...lot, amount: 1.5 }, true, empty).includes('malformed_lot'));
+});
+
+test('malformed receipts still classify every valid allocation reference independently', () => {
+  const owner = randomUUID(), at = new Date();
+  const receipt = { _id: 'receipt', userId: owner, requestId: 'request', fingerprint: 'private-fingerprint',
+    result: 'malformed-private-result', createdAt: at,
+    allocations: [null, { lotId: 'missing', amount: 'invalid' }, { lotId: 'foreign', amount: 1 }, { lotId: 'missing', amount: 1 }] };
+  assert.deepEqual(provenanceInspection.coinReceiptIssues(receipt, true, { total: 1, owned: 0 }),
+    ['malformed_receipt', 'missing_allocation_lot', 'foreign_allocation_lot']);
+  assert.deepEqual(provenanceInspection.coinReceiptIssues(receipt, true, { total: 2, owned: 2 }), ['malformed_receipt']);
+  assert.deepEqual(provenanceInspection.coinReceiptIssues({ ...receipt, allocations: [null, { lotId: 1 }] }, true,
+    { total: 0, owned: 0 }), ['malformed_receipt'], 'invalid reference values are not invented references');
+});
+
+test('malformed lots still classify valid operation references independently', () => {
+  const owner = randomUUID(), at = new Date();
+  const lot = { _id: 'lot', userId: owner, source: 'controller', operationId: 'operation',
+    amount: 1, remaining: 2, creditedAt: at, expiresAt: null };
+  assert.deepEqual(provenanceInspection.coinLotIssues(lot, true, { total: 0, owned: 0 }),
+    ['malformed_lot', 'unclassified_source', 'missing_referenced_operation']);
+  assert.deepEqual(provenanceInspection.coinLotIssues(lot, true, { total: 1, owned: 0 }),
+    ['malformed_lot', 'unclassified_source', 'foreign_referenced_operation']);
+  assert.deepEqual(provenanceInspection.coinLotIssues(lot, true, { total: 1, owned: 1 }),
+    ['malformed_lot', 'unclassified_source']);
+  assert.deepEqual(provenanceInspection.coinLotIssues({ ...lot, operationId: null }, true, { total: 0, owned: 0 }),
+    ['malformed_lot', 'unclassified_source']);
+  assert.deepEqual(provenanceInspection.coinLotIssues({ ...lot, source: 'welcome', operationId: `${owner}:opening` },
+    true, { total: 0, owned: 0 }), ['malformed_lot', 'opening_receipt_not_required']);
+});
+
+test('monetary TTL readiness distinguishes the known sync transition from drift', () => {
+  const index = { name: 'createdAt_1', key: { createdAt: 1 }, expireAfterSeconds: 30 * 86400 };
+  assert.deepEqual(provenanceInspection.monetaryTtlCounts('sync_operations', [index]), { ttlIndexes: 1, legacySyncTtlIndexes: 1, unexpectedTtlIndexes: 0 });
+  for (const override of [{ expireAfterSeconds: 1 }, { hidden: true }, { unique: true }, { sparse: true },
+    { partialFilterExpression: {} }, { collation: {} }, { name: 'unexpected' }, { key: { other: 1 } }]) {
+    assert.equal(provenanceInspection.monetaryTtlCounts('sync_operations', [{ ...index, ...override }]).unexpectedTtlIndexes, 1);
+  }
+  for (const name of ['energy_ledger', 'coin_operations', 'coin_lots']) {
+    assert.equal(provenanceInspection.monetaryTtlCounts(name, [index]).unexpectedTtlIndexes, 1);
+    assert.equal(provenanceInspection.monetaryTtlCounts(name, [{ key: { _id: 1 } }]).ttlIndexes, 0);
+  }
+});
 
 test('retention tooling defaults to inspection and requires an explicit database for apply', () => {
   assert.deepEqual(retentionArguments([]), { apply: false });
