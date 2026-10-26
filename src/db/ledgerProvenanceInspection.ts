@@ -89,7 +89,8 @@ function referenceCounts(from: string, references: unknown, as: string): Documen
 }
 const ownerLookup: Document = { $lookup: { from: 'atomic_users', localField: 'userId', foreignField: '_id',
   pipeline: [{ $limit: 1 }, { $project: { _id: 0, exists: { $literal: true } } }], as: 'owners' } };
-const stringIds = (input: unknown): Document => ({ $filter: { input: { $cond: [{ $isArray: input }, input, []] },
+// Wrap the operand so an array expression is not parsed as $isArray's argument list.
+const stringIds = (input: unknown): Document => ({ $filter: { input: { $cond: [{ $isArray: [input] }, input, []] },
   as: 'id', cond: { $and: [{ $eq: [{ $type: '$$id' }, 'string'] }, { $ne: ['$$id', ''] }] } } });
 const operationIds = (field: string): Document => stringIds([field]);
 const matchCounts = (counts: Matches[] | undefined): Matches => counts?.[0] ?? { total: 0, owned: 0 };

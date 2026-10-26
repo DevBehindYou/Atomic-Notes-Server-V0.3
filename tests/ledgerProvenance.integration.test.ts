@@ -88,7 +88,7 @@ test('read-only provenance report counts only explicit surviving links and catal
     const report = await inspectLedgerRetention(inspectedDb);
     assert.equal(report.retainedRowsWithExplicitReferences, 2);
     assert.equal(report.retainedRowsWithoutExplicitReferences, 1);
-    assert.equal(report.missingReferencedOperations, 1);
+    assert.equal(report.missingReferencedOperations, 1, 'the existing scalar operation reference must survive array sanitization');
     assert.equal(report.foreignReferencedLots, 1);
     assert.equal(report.coinReceipts, 4, 'a no-op receipt has no ledger row and is still valid');
     assert.equal(report.malformedCoinReceipts, 0);
@@ -96,7 +96,7 @@ test('read-only provenance report counts only explicit surviving links and catal
     assert.equal(report.foreignAllocationLots, 1);
     assert.equal(report.unclassifiedCoinLotSources, 2);
     assert.equal(report.openingLotsWithoutReceipt, 2);
-    assert.equal(report.missingLotOperations, 0);
+    assert.equal(report.missingLotOperations, 0, 'the existing scalar lot operation reference must survive array sanitization');
     assert.equal(report.scalarLotMismatchAccounts, 0);
     assert.equal(report.archivedAggregateRows, 1);
     assert.equal(report.archivedSpends, 4);
