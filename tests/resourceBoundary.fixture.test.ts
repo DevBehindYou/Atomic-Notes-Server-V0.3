@@ -54,7 +54,9 @@ test('push rejects malformed, oversized and unstorable rows before any Drive cal
   assert.equal((await push([foreign], FIXTURE_TOKENS.other)).status, 200);
 
   const before = await accountState(fixture.owner), callsBefore = providerCalls();
-  const deep = JSON.parse('['.repeat(10000) + ']'.repeat(10000));
+  // Sent as raw text: JSON.stringify is recursive, the Server's JSON.parse is not.
+  const deep = '['.repeat(10000) + ']'.repeat(10000);
+  const pushDeep = (row: object) => post(JSON.stringify({ mode: 'instant', requestId: randomUUID(), rows: [row] }).replace('"__deep__"', deep));
   const rejected: Array<[string, () => Promise<Response>, number, string]> = [
     ['unparseable JSON', () => post('{"rows":['), 400, 'invalid_json'],
     ['non-object body', () => post('[]'), 400, 'invalid_request'],
@@ -66,8 +68,8 @@ test('push rejects malformed, oversized and unstorable rows before any Drive cal
     ['malformed request ID', () => post(JSON.stringify({ mode: 'instant', requestId: 'retry-1', rows: [appRow()] })), 400, 'invalid_request'],
     ['101 rows', () => push(Array.from({ length: 101 }, () => appRow())), 400, 'invalid_request'],
     ['duplicate note IDs', () => { const row = appRow(); return push([row, { ...row }]); }, 400, 'duplicate_note_ids'],
-    ['deeply nested items', () => push([appRow({ items: deep })]), 400, 'invalid_request'],
-    ['deeply nested item text', () => push([appRow({ items: [{ t: deep, d: false }] })]), 400, 'invalid_request'],
+    ['deeply nested items', () => pushDeep(appRow({ items: '__deep__' })), 400, 'invalid_request'],
+    ['deeply nested item text', () => pushDeep(appRow({ items: [{ t: '__deep__', d: false }] })), 400, 'invalid_request'],
     ['non-finite base version', () => post(JSON.stringify({ mode: 'instant', requestId: randomUUID(), rows: [appRow()] })
       .replace('"base_version":0', '"base_version":1e309')), 400, 'invalid_request'],
     ['rich body over the note bound', () => push([appRow({ kind: 'text', items: [], body: 'a'.repeat(262145) })]), 400, 'invalid_request'],
