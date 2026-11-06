@@ -20,6 +20,21 @@ import { listManagedSessions, revokeManagedSession } from '../lib/sessionManagem
 const auth = new Hono();
 
 /**
+ * Google's verifier puts the raw ID token or its decoded claims (subject, email, name) in its
+ * error messages, and the global error handler logs a thrown error's stack. A rejected token is
+ * therefore answered as null (`invalid_id_token`), and a failed certificate fetch is rethrown as a
+ * fresh error without the original message: it stays a server failure, never an invalid credential.
+ */
+async function verifiedIdTokenClaims(client: Pick<ReturnType<typeof getOAuthClient>, 'verifyIdToken'>, idToken: string) {
+  try {
+    return (await client.verifyIdToken({ idToken, audience: process.env.GOOGLE_CLIENT_ID! })).getPayload() ?? null;
+  } catch (error) {
+    if ((error as { config?: unknown } | null)?.config !== undefined) throw new Error('id_token_certificates_unavailable');
+    return null;
+  }
+}
+
+/**
  * Shared by both login paths (web redirect and native mobile) once each has
  * its own way of getting a `code`/`serverAuthCode` exchanged into tokens.
  * Everything downstream of "we have tokens + a verified id_token" is
@@ -44,7 +59,7 @@ export async function completeGoogleLogin(
   // The ID token is the normal source of identity. If Google left it out of the exchange, the
   // userinfo endpoint answers for the access token this Server itself just obtained with its secret.
   const payload = tokens.id_token
-    ? (await client.verifyIdToken({ idToken: tokens.id_token, audience: process.env.GOOGLE_CLIENT_ID! })).getPayload()
+    ? await verifiedIdTokenClaims(client, tokens.id_token)
     : await profileOf(tokens.access_token);
   if (!payload && !tokens.id_token) return { error: 'incomplete_token_response' as const };
   if (!payload?.email || !payload.sub || payload.email_verified !== true) return { error: 'invalid_id_token' as const };
