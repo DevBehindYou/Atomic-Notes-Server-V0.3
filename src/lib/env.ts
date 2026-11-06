@@ -1,3 +1,5 @@
+import { credentialEnvIssues } from './crypto.js';
+
 export type EnvIssue = { name: string; problem: string };
 
 /**
@@ -14,6 +16,8 @@ export function getEnvIssues(env: NodeJS.ProcessEnv = process.env): EnvIssue[] {
   if (!missing('TOKEN_ENCRYPTION_KEY') && Buffer.from(env.TOKEN_ENCRYPTION_KEY!, 'base64').length !== 32) {
     issues.push({ name: 'TOKEN_ENCRYPTION_KEY', problem: 'must be base64 that decodes to exactly 32 bytes' });
   }
+  // Optional key-rotation settings; unset keeps the single-key legacy configuration valid.
+  issues.push(...credentialEnvIssues(env));
   missing('GOOGLE_CLIENT_ID');
   missing('GOOGLE_CLIENT_SECRET');
   if (!missing('GOOGLE_REDIRECT_URI') && !/^https:\/\/[^\s/]+\/api\/auth\/callback$/.test(env.GOOGLE_REDIRECT_URI!)) {
