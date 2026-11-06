@@ -34,6 +34,12 @@ async function verifiedIdTokenClaims(client: Pick<ReturnType<typeof getOAuthClie
   }
 }
 
+/** users.email is unique, but accounts link by Google subject only, never by email. */
+function isEmailHeldByAnotherAccount(error: unknown) {
+  const e = error as { code?: unknown; keyPattern?: Record<string, unknown> } | null;
+  return e?.code === 11000 && e.keyPattern?.email !== undefined;
+}
+
 /**
  * Shared by both login paths (web redirect and native mobile) once each has
  * its own way of getting a `code`/`serverAuthCode` exchanged into tokens.
@@ -72,18 +78,29 @@ export async function completeGoogleLogin(
     const now = new Date();
     const email = payload.email.toLowerCase();
     const userId = existing?.userId ?? randomUUID();
-    await withTransaction(async (session) => {
-      // Link by Google's stable subject, never by an email that might change owners.
-      await collections.users(db).updateOne({ _id: userId }, {
-        $set: { email, displayName: payload.name ?? null, updatedAt: now },
-        $setOnInsert: { createdAt: now },
-      }, { upsert: true, session });
-      await collections.googleAccounts(db).updateOne({ googleAccountId }, {
-        $set: { encryptedAccessToken: encryptToken(tokens.access_token!), encryptedRefreshToken: encryptToken(refreshToken),
-          tokenExpiry: new Date(tokens.expiry_date ?? Date.now() + 3600000) },
-        $setOnInsert: { _id: randomUUID(), userId, googleAccountId, driveRootFolderId: null, createdAt: now },
-      }, { upsert: true, session });
-    });
+    try {
+      await withTransaction(async (session) => {
+        // Link by Google's stable subject, never by an email that might change owners.
+        await collections.users(db).updateOne({ _id: userId }, {
+          $set: { email, displayName: payload.name ?? null, updatedAt: now },
+          $setOnInsert: { createdAt: now },
+        }, { upsert: true, session });
+        await collections.googleAccounts(db).updateOne({ googleAccountId }, {
+          $set: { encryptedAccessToken: encryptToken(tokens.access_token!), encryptedRefreshToken: encryptToken(refreshToken),
+            tokenExpiry: new Date(tokens.expiry_date ?? Date.now() + 3600000) },
+          $setOnInsert: { _id: randomUUID(), userId, googleAccountId, driveRootFolderId: null, createdAt: now },
+        }, { upsert: true, session });
+      });
+    } catch (error) {
+      // Another account still holds this verified address (a reassigned Workspace address, a recreated
+      // Google account, or this account's Google email moved onto it). The transaction wrote nothing.
+      // Refuse without merging; the duplicate-key message names the email, so it must not reach the log.
+      if (isEmailHeldByAnotherAccount(error)) {
+        return { error: 'account_email_conflict' as const,
+          hint: 'This Google account\'s email address is already used by another Atomic Notes account.' };
+      }
+      throw error;
+    }
     if (!existing?.driveRootFolderId) {
       const folders = await setupFolders(tokens.access_token, refreshToken);
       await collections.googleAccounts(db).updateOne({ googleAccountId, userId }, { $set: { driveRootFolderId: folders.notesId } });
