@@ -85,14 +85,14 @@ test('each sync request builds one Drive client and stays within its in-flight b
 
   // 25 new notes: 25 lookups and 25 creates through one client, at most 8 at once.
   const created = await call('POST', '/api/notes/push', { requestId: randomUUID(), mode: 'instant', rows: ids.map((id) => row(id, 'Synthetic body')) });
-  assert.equal(created.status, 200);
+  assert.equal(created.status, 200, JSON.stringify(created.json));
   assert.ok((created.json as Results).results.every((r) => r.ok));
   assert.deepEqual([created.clients, created.requests, files.size], [1, 50, 25]);
   assert.ok(created.maxInFlight <= 8, `push in flight ${created.maxInFlight}`);
 
   // Edits: 25 updates, one client.
   const edited = await call('POST', '/api/notes/push', { requestId: randomUUID(), mode: 'instant', rows: ids.map((id) => row(id, 'Synthetic edit', 1)) });
-  assert.equal(edited.status, 200);
+  assert.equal(edited.status, 200, JSON.stringify(edited.json));
   assert.deepEqual([edited.clients, edited.requests], [1, 25]);
   assert.ok(edited.maxInFlight <= 8, `push in flight ${edited.maxInFlight}`);
 
@@ -100,7 +100,7 @@ test('each sync request builds one Drive client and stays within its in-flight b
   let after = 0, pages = 0, rows = 0;
   for (;;) {
     const page = await call('GET', `/api/notes/pull?after=${after}`);
-    assert.equal(page.status, 200);
+    assert.equal(page.status, 200, JSON.stringify(page.json));
     const body = page.json as { rows: { body: string }[]; nextCursor: number; hasMore: boolean };
     assert.ok(body.rows.every((r) => r.body === 'Synthetic edit'));
     assert.deepEqual([page.clients, page.requests], [1, body.rows.length]);
@@ -112,7 +112,7 @@ test('each sync request builds one Drive client and stays within its in-flight b
 
   // Emptying the cloud: 25 trash requests, one client.
   const wiped = await call('DELETE', '/api/notes');
-  assert.equal(wiped.status, 200);
+  assert.equal(wiped.status, 200, JSON.stringify(wiped.json));
   assert.deepEqual([wiped.clients, wiped.requests], [1, 25]);
   assert.ok([...files.values()].every((f) => f.trashed));
   assert.equal(stats.foreignAuth, 0, 'every Drive request carries this user\'s stored token');
