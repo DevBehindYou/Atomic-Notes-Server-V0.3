@@ -1776,6 +1776,54 @@ test('Server contracts with a real MongoDB replica set and a fake Drive adapter'
     assert.equal(await collections.users(db).findOne({ email: 'norefresh@example.com' }), null);
   });
 
+  await t.test('a verified email still held by another account is a bounded refusal that links, changes and logs nothing', async () => {
+    // users.email is unique; accounts link by Google subject only. A different subject can present an
+    // address another account still holds (a reassigned Workspace address, a recreated Google account),
+    // and a returning subject's Google email can move onto one. Neither may merge accounts or answer 500.
+    const verifier = { async verifyIdToken({ idToken }: { idToken: string }) { return { getPayload: () => JSON.parse(idToken) }; } } as any;
+    const login = (sub: string, email: string, tokens: object = {}) => completeGoogleLogin(db, verifier, {
+      access_token: 'access-1', refresh_token: 'refresh-1', expiry_date: Date.now() + 3600000,
+      id_token: JSON.stringify({ sub, email, email_verified: true, name: 'Conflict Person' }), ...tokens },
+    'test-agent', async () => ({ notesId: 'folder-conflict' }));
+    const conflict = { error: 'account_email_conflict',
+      hint: 'This Google account\'s email address is already used by another Atomic Notes account.' };
+    const heldEmail = `held-${randomUUID()}@example.com`;
+    const holder = await user(heldEmail);
+    const holderUser = await collections.users(db).findOne({ _id: holder.id });
+    const holderAccount = await collections.googleAccounts(db).findOne({ userId: holder.id });
+    const logged: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')); };
+    try {
+      const newcomer = randomUUID(), sessionsBefore = await collections.sessions(db).countDocuments({});
+      assert.deepEqual(await login(newcomer, heldEmail.toUpperCase()), conflict);
+      assert.equal(await collections.googleAccounts(db).findOne({ googleAccountId: newcomer }), null);
+      assert.equal(await collections.users(db).countDocuments({ email: heldEmail }), 1);
+      assert.deepEqual(await collections.users(db).findOne({ _id: holder.id }), holderUser);
+      assert.deepEqual(await collections.googleAccounts(db).findOne({ userId: holder.id }), holderAccount);
+      assert.equal(await collections.sessions(db).countDocuments({}), sessionsBefore);
+      assert.equal(await db.collection<{ _id: string }>('operation_locks').findOne({ _id: `google:${newcomer}` }), null);
+      assert.equal((await request('/notes/count', 'GET', undefined, holder.token)).status, 200);
+
+      const returning = randomUUID(), ownEmail = `own-${randomUUID()}@example.com`;
+      const first = await login(returning, ownEmail) as { token: string; user: { id: string; email: string } };
+      assert.equal(first.user.email, ownEmail);
+      const accountBefore = await collections.googleAccounts(db).findOne({ googleAccountId: returning });
+      const userBefore = await collections.users(db).findOne({ _id: first.user.id });
+      const sessionsMid = await collections.sessions(db).countDocuments({});
+      assert.deepEqual(await login(returning, heldEmail, { access_token: 'access-2', refresh_token: 'refresh-2' }), conflict);
+      assert.deepEqual(await collections.googleAccounts(db).findOne({ googleAccountId: returning }), accountBefore);
+      assert.deepEqual(await collections.users(db).findOne({ _id: first.user.id }), userBefore);
+      assert.deepEqual(await collections.users(db).findOne({ _id: holder.id }), holderUser);
+      assert.equal(await collections.sessions(db).countDocuments({}), sessionsMid);
+      assert.equal((await request('/notes/count', 'GET', undefined, first.token)).status, 200);
+      // The refusal released the subject lock: the same subject signs in again under its own address.
+      const again = await login(returning, ownEmail) as { user: { id: string } };
+      assert.equal(again.user.id, first.user.id);
+    } finally { console.error = original; }
+    assert.equal(logged.some((line) => line.includes(heldEmail)), false);
+  });
+
   await t.test('OAuth state is stored hashed, bound to a cookie, and rejected when the binding or lifetime is wrong', async () => {
     const start = await app.request('/api/auth/google');
     assert.equal(start.status, 302);
