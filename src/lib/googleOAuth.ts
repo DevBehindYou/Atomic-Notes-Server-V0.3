@@ -48,8 +48,43 @@ export async function exchangeCode(code: string) {
   return tokens;
 }
 
-export async function refreshAccessToken(refreshToken: string) {
-  const client = getOAuthClient();
+/**
+ * Bound on each request to Google's token endpoint. The OAuth library sets no
+ * timeout of its own, so a stalled refresh held a push or pull, and its per-user
+ * notes lock, until the platform ended the function. Drive requests set their own.
+ */
+export const GOOGLE_TOKEN_TIMEOUT_MS = 10000;
+
+/** Test seam only: send every Google request to a loopback origin. Production callers pass nothing. */
+export type GoogleTransportOverrides = { origin?: string };
+type Adapter = NonNullable<NonNullable<ConstructorParameters<typeof google.auth.OAuth2>[0] & object>['transporterOptions']>['adapter'];
+
+/** Rewrites token, Drive and Drive upload URLs to [origin], keeping path and query. */
+export function loopbackAdapter(origin: string): Adapter {
+  return (options, next) => {
+    const url = new URL(options.url);
+    options.url = new URL(`${url.pathname}${url.search}`, origin);
+    return next(options);
+  };
+}
+
+/**
+ * The OAuth client behind Server-side Drive work and token refresh, including the
+ * refresh the Drive library makes by itself after a 401/403. Sign-in uses [getOAuthClient].
+ */
+export function getTokenRefreshClient(overrides: GoogleTransportOverrides = {}) {
+  return new google.auth.OAuth2({
+    clientId: process.env.GOOGLE_CLIENT_ID,
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    redirectUri: process.env.GOOGLE_REDIRECT_URI,
+    // Requests that set their own timeout (every Drive call) keep it; this bounds the token requests.
+    transporterOptions: { timeout: GOOGLE_TOKEN_TIMEOUT_MS,
+      ...(overrides.origin ? { adapter: loopbackAdapter(overrides.origin) } : {}) },
+  });
+}
+
+export async function refreshAccessToken(refreshToken: string, overrides: GoogleTransportOverrides = {}) {
+  const client = getTokenRefreshClient(overrides);
   client.setCredentials({ refresh_token: refreshToken });
   const { credentials } = await client.refreshAccessToken();
   return credentials;

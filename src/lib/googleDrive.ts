@@ -1,13 +1,20 @@
 import { Readable } from 'node:stream';
 import { google, drive_v3 } from 'googleapis';
-import { getOAuthClient } from './googleOAuth.js';
+import { getTokenRefreshClient, loopbackAdapter, type GoogleTransportOverrides } from './googleOAuth.js';
 
 const APP_FOLDER_NAME = 'My-Atomic-Notes';
 
-function driveClient(accessToken: string, refreshToken: string): drive_v3.Drive {
-  const auth = getOAuthClient();
+/** Bound on each Drive HTTP request, including a media upload or download. */
+export const DRIVE_REQUEST_TIMEOUT_MS = 20000;
+
+/** Test seam only: a loopback Google origin and a shorter Drive timeout. */
+export type DriveClientOverrides = GoogleTransportOverrides & { timeout?: number };
+
+export function driveClient(accessToken: string, refreshToken: string, overrides: DriveClientOverrides = {}): drive_v3.Drive {
+  const auth = getTokenRefreshClient(overrides);
   auth.setCredentials({ access_token: accessToken, refresh_token: refreshToken });
-  return google.drive({ version: 'v3', auth, timeout: 20000 });
+  return google.drive({ version: 'v3', auth, timeout: overrides.timeout ?? DRIVE_REQUEST_TIMEOUT_MS,
+    ...(overrides.origin ? { adapter: loopbackAdapter(overrides.origin) } : {}) });
 }
 
 export async function findOrCreateFolder(
@@ -49,6 +56,9 @@ const quoteQueryValue = (value: string) => value.replace(/\\/g, '\\\\').replace(
  * Drive and MongoDB cannot commit together, so a create can succeed and the
  * metadata commit after it fail. Filenames are the note ID, so a retry looks
  * for that file first and rewrites it instead of leaving a second copy.
+ * That guard is only as good as the name lookup: it assumes Drive lists a file
+ * it has just committed. Google documents pre-generated IDs (driveGeneration.ts,
+ * not yet wired into /push) as the duplicate-proof way to retry an ambiguous create.
  */
 export async function createNoteFileWith(drive: drive_v3.Drive, parentId: string, filename: string, content: object) {
   const media = () => ({ mimeType: 'application/json', body: Readable.from(JSON.stringify(content)) });
@@ -141,7 +151,11 @@ export function isDriveRetryable(error: unknown): boolean {
 /**
  * Runs one Drive call, retrying [isDriveRetryable] failures after 0.5 s, 1 s, then 2 s (plus up to 0.5 s of
  * jitter, so parallel writes do not retry in step). Every call made through it is safe to repeat: updates and
- * reads are idempotent, and a create looks for an existing file with that name first.
+ * reads are idempotent, and a create reruns its name lookup first (see [createNoteFileWith]).
+ *
+ * A timeout or a dropped connection is never retried here: Google may have committed the write, and
+ * the caller reports the row as failed so the App retries it later. Note that the Drive library also
+ * retries GET requests (list, download) three times on 429/5xx inside each attempt here.
  */
 export async function withDriveRetry<T>(
   call: () => Promise<T>,
