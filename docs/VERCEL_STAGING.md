@@ -43,7 +43,8 @@ settings only; it is not a usable credential set and is never auto-loaded.
 | `GOOGLE_CLIENT_ID` | New **Web application** OAuth client in a separate staging Google Cloud project with Drive API enabled. This ID is also the native client's `serverClientId`. |
 | `GOOGLE_CLIENT_SECRET` | Secret belonging to that staging Web OAuth client, configured only on the server. |
 | `GOOGLE_REDIRECT_URI` | Exact registered HTTPS callback, normally `https://atomic-notes-app-server-staging.vercel.app/api/auth/callback`. |
-| `TOKEN_ENCRYPTION_KEY` | New staging-only base64 value decoding to exactly 32 bytes. Owner generates and stores it privately. Rotating it makes existing encrypted staging Google tokens unreadable. |
+| `TOKEN_ENCRYPTION_KEY` | New staging-only base64 value decoding to exactly 32 bytes. Owner generates and stores it privately. Replacing it without keeping the old key in `TOKEN_ENCRYPTION_PREVIOUS_KEYS` makes existing encrypted staging Google tokens unreadable. |
+| `TOKEN_ENCRYPTION_PREVIOUS_KEYS` / `TOKEN_ENCRYPTION_WRITE_FORMAT` | Leave unset for baseline staging. Rotation and the opt-in v1 writer are described in [CREDENTIAL_ENVELOPE](CREDENTIAL_ENVELOPE.md). |
 | `ADMIN_API_KEY` | New staging-only secret containing at least 32 bytes. Only trusted server-side controller/test tooling may use it. |
 | `ALLOWED_ORIGIN` | Optional comma-separated exact HTTPS browser origins. Leave unset for native-only tests; use only intended staging browser origins if needed. CORS does not authenticate native apps. |
 | `ATOMIC_LOGOUT_SYNC_ENABLED` | Optional `true` or `false`. Leave unset for the existing default behavior unless the accepted staging test plan specifically enables it. |
