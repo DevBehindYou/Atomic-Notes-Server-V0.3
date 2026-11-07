@@ -18,7 +18,8 @@ import { getDb } from '../db/mongo.js';
 import { collections, type NoteDoc } from '../db/collections.js';
 import { requireAuth } from '../middleware/auth.js';
 import { decryptToken, encryptToken } from '../lib/crypto.js';
-import { createNoteFile, updateNoteFile, deleteNoteFile, getNoteFileContent, ensureAppFolders, isDriveNotFound, withDriveRetry } from '../lib/googleDrive.js';
+import { createNoteFile, updateNoteFile, deleteNoteFile, getNoteFileContent, ensureAppFolders, isDriveNotFound, withDriveRetry,
+  driveSession, type DriveCalls } from '../lib/googleDrive.js';
 import { isInvalidGrant, refreshAccessToken } from '../lib/googleOAuth.js';
 import { migrateAtomicFile, CorruptAtomicFileError } from '../types/atomicFile.js';
 import { httpError } from '../lib/httpError.js';
@@ -30,6 +31,11 @@ export type DriveAdapter = {
   deleteNoteFile: typeof deleteNoteFile;
   getNoteFileContent: typeof getNoteFileContent;
   ensureAppFolders?: typeof ensureAppFolders;
+  /**
+   * Builds one request's Drive calls for one user, sharing one client (see driveSession). Adapters
+   * without it, such as test fixtures, are called through the token functions above.
+   */
+  forRequest?: (accessToken: string, refreshToken: string) => DriveCalls;
 };
 
 /** Notes per push request. Matches the most notes an account can hold, so one upload of everything is one request. */
@@ -43,17 +49,31 @@ const DRIVE_CONCURRENCY = 8;
 /** Rows per pull page. All of a page's Drive reads run at once, so a page costs one Drive round trip. */
 const PULL_PAGE = 10;
 
-export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateNoteFile, deleteNoteFile, getNoteFileContent },
-  options: { logoutSync?: boolean } = {}) {
+export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateNoteFile, deleteNoteFile, getNoteFileContent,
+  forRequest: driveSession }, options: { logoutSync?: boolean } = {}) {
   // Rollout is disabled until Server/App acceptance and deployment approval.
   const logoutSync = options.logoutSync ?? process.env.ATOMIC_LOGOUT_SYNC_ENABLED === 'true';
-  // Every Drive call is timed so a slow request shows how much of it was Google (see Server-Timing).
-  // Rate limits and passing Google errors are retried with backoff inside the timing.
-  const createNoteFile = (...args: Parameters<DriveAdapter['createNoteFile']>) => timedDrive(() => withDriveRetry(() => drive.createNoteFile(...args)));
-  const updateNoteFile = (...args: Parameters<DriveAdapter['updateNoteFile']>) => timedDrive(() => withDriveRetry(() => drive.updateNoteFile(...args)));
-  const deleteNoteFile = (...args: Parameters<DriveAdapter['deleteNoteFile']>) => timedDrive(() => withDriveRetry(() => drive.deleteNoteFile(...args)));
-  const getNoteFileContent = (...args: Parameters<DriveAdapter['getNoteFileContent']>) => timedDrive(() => withDriveRetry(() => drive.getNoteFileContent(...args)));
-  const ensureFolders = (...args: Parameters<typeof ensureAppFolders>) => timedDrive(() => withDriveRetry(() => (drive.ensureAppFolders ?? ensureAppFolders)(...args)));
+  /**
+   * One request's Drive calls for one user. Every call is timed so a slow request shows how much of it was
+   * Google (see Server-Timing); rate limits and passing Google errors are retried with backoff inside the timing.
+   */
+  const driveCallsFor = (accessToken: string, refreshToken: string): DriveCalls => {
+    const calls: DriveCalls = drive.forRequest?.(accessToken, refreshToken) ?? {
+      createNoteFile: (parentId, name, content) => drive.createNoteFile(accessToken, refreshToken, parentId, name, content),
+      updateNoteFile: (fileId, content) => drive.updateNoteFile(accessToken, refreshToken, fileId, content),
+      deleteNoteFile: (fileId) => drive.deleteNoteFile(accessToken, refreshToken, fileId),
+      getNoteFileContent: (fileId) => drive.getNoteFileContent(accessToken, refreshToken, fileId),
+      ensureAppFolders: () => (drive.ensureAppFolders ?? ensureAppFolders)(accessToken, refreshToken),
+    };
+    const timed = <T>(call: () => Promise<T>) => timedDrive(() => withDriveRetry(call));
+    return {
+      createNoteFile: (parentId, name, content) => timed(() => calls.createNoteFile(parentId, name, content)),
+      updateNoteFile: (fileId, content) => timed(() => calls.updateNoteFile(fileId, content)),
+      deleteNoteFile: (fileId) => timed(() => calls.deleteNoteFile(fileId)),
+      getNoteFileContent: (fileId) => timed(() => calls.getNoteFileContent(fileId)),
+      ensureAppFolders: () => timed(() => calls.ensureAppFolders()),
+    };
+  };
   const notesRoute = new Hono();
   // Notes are written through /push only, where sync is charged and rate limited. The single-note REST writes
   // would be a way around both, so they are closed.
@@ -152,7 +172,10 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
     return c.json({ ok: true, attemptId: result.attemptId, state: result.state });
   });
 
-  /** Loads this user's Google tokens, refreshing the access token first if it's about to expire. */
+  /**
+   * Loads this user's Google tokens, refreshing the access token first if it's about to expire, and returns
+   * this request's Drive calls for them. Call it once per request; the calls end with the request.
+   */
   async function getLiveGoogleTokens(db: Awaited<ReturnType<typeof getDb>>, userId: string) {
     const account = await collections.googleAccounts(db).findOne({ userId });
     if (!account) throw Object.assign(new Error('no_google_account_linked'), { status: 409 });
@@ -177,7 +200,7 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
     }
 
     if (!account.driveRootFolderId) throw Object.assign(new Error('drive_not_initialized'), { status: 409 });
-    return { accessToken, refreshToken, driveFolderId: account.driveRootFolderId };
+    return { google: driveCallsFor(accessToken, refreshToken), driveFolderId: account.driveRootFolderId };
   }
 
   // ---------------------------------------------------------------------------
@@ -206,8 +229,8 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
     const existing = await collections.notes(db).findOne({ _id: id, userId });
     if (!existing) return c.json({ error: 'not_found' }, 404);
 
-    const { accessToken, refreshToken } = await getLiveGoogleTokens(db, userId);
-    await deleteNoteFile(accessToken, refreshToken, existing.driveFileId);
+    const { google } = await getLiveGoogleTokens(db, userId);
+    await google.deleteNoteFile(existing.driveFileId);
     await saveNoteMetadata(db, userId, id, { deleted: true, updatedAt: new Date() });
     await logEvent(db, 'note_deleted', { userId, meta: { noteId: id } });
     return c.json({ ok: true });
@@ -292,7 +315,7 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
       availableSlots = noteLimit - activeCount;
     }
 
-    const { accessToken, refreshToken, driveFolderId } = await getLiveGoogleTokens(db, userId);
+    const { google, driveFolderId } = await getLiveGoogleTokens(db, userId);
     const operation = recorded ?? (logoutAttemptId
       ? await openLogoutBatch(db, userId, c.get('sessionToken'), logoutAttemptId, requestId, rows)
       : await openSync(db, userId, requestId, rows, mode));
@@ -303,17 +326,17 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
     let folderId = driveFolderId;
     let recreating: Promise<void> | null = null;
     const recreateFolder = () => (recreating ??= (async () => {
-      folderId = (await ensureFolders(accessToken, refreshToken)).notesId;
+      folderId = (await google.ensureAppFolders()).notesId;
       await collections.googleAccounts(db).updateOne({ userId }, { $set: { driveRootFolderId: folderId } });
       await logEvent(db, 'drive_folder_recreated', { userId, level: 'warn' });
     })());
     const createInFolder = async (name: string, content: object) => {
       try {
-        return await createNoteFile(accessToken, refreshToken, folderId, name, content);
+        return await google.createNoteFile(folderId, name, content);
       } catch (error) {
         if (!isDriveNotFound(error)) throw error;
         await recreateFolder();
-        return createNoteFile(accessToken, refreshToken, folderId, name, content);
+        return google.createNoteFile(folderId, name, content);
       }
     };
 
@@ -358,7 +381,7 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
       let driveRevisionId: string | null;
       if (existing) {
         try {
-          const f = await updateNoteFile(accessToken, refreshToken, existing.driveFileId, driveContent);
+          const f = await google.updateNoteFile(existing.driveFileId, driveContent);
           driveFileId = existing.driveFileId;
           driveRevisionId = f.headRevisionId ?? existing.driveRevisionId;
         } catch (error) {
@@ -380,7 +403,7 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
       }
       if (row.deleted) {
         try {
-          await deleteNoteFile(accessToken, refreshToken, driveFileId);
+          await google.deleteNoteFile(driveFileId);
         } catch (error) {
           if (!isDriveNotFound(error)) throw error; // already gone
         }
@@ -519,7 +542,7 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
     const nextCursor = hasMore ? metaRows[metaRows.length - 1].syncSequence ?? 0 : upper;
     if (metaRows.length === 0) return c.json({ rows: [], cursor, nextCursor, hasMore: false });
 
-    const { accessToken, refreshToken } = await getLiveGoogleTokens(db, userId);
+    const { google } = await getLiveGoogleTokens(db, userId);
 
     // Bound Drive requests while retaining row order. This does not replace
     // pagination or a durable sync cursor for large accounts.
@@ -528,7 +551,7 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
         try {
           // A deleted note's file is only in the Drive trash, where it stays readable. Sending its content
           // lets every device keep it in a Recycle Bin and restore the real note, not an empty one.
-          const raw = await getNoteFileContent(accessToken, refreshToken, m.driveFileId);
+          const raw = await google.getNoteFileContent(m.driveFileId);
           const content = migrateAtomicFile(raw);
           // Drive can change before the metadata transaction commits (or remain
           // changed after a failed commit). Never label that content with the old
@@ -573,10 +596,10 @@ export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateN
     const all = await collections.notes(db).find({ userId }).toArray();
 
     if (all.length > 0) {
-      const { accessToken, refreshToken } = await getLiveGoogleTokens(db, userId);
+      const { google } = await getLiveGoogleTokens(db, userId);
       await mapConcurrent(all, DRIVE_CONCURRENCY, async (n) => {
         try {
-          await deleteNoteFile(accessToken, refreshToken, n.driveFileId);
+          await google.deleteNoteFile(n.driveFileId);
         } catch (error) {
           if (!isDriveNotFound(error)) throw error; // already deleted in Drive
         }

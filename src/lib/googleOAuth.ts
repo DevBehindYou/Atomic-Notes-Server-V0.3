@@ -77,6 +77,10 @@ export function getTokenRefreshClient(overrides: GoogleTransportOverrides = {}) 
     clientId: process.env.GOOGLE_CLIENT_ID,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET,
     redirectUri: process.env.GOOGLE_REDIRECT_URI,
+    // One client serves all of a request's Drive calls (driveSession). After a refresh it holds an expiry,
+    // and without this flag a 401 for a call that was sent with the old token before the refresh would
+    // fail instead of refreshing and replaying once, as every call did when each built its own client.
+    forceRefreshOnFailure: true,
     // Requests that set their own timeout (every Drive call) keep it; this bounds the token requests.
     transporterOptions: { timeout: GOOGLE_TOKEN_TIMEOUT_MS,
       ...(overrides.origin ? { adapter: loopbackAdapter(overrides.origin) } : {}) },
