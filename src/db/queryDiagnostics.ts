@@ -23,7 +23,7 @@ export type Shape =
   | { kind: 'distinct'; key: string; filter: Filter<AnyDoc> };
 
 export type ProbeContext = {
-  userId: string; asOf: Date; sessionHash: string | null; email: string | null; userCreatedAt: Date | null;
+  userId: string; asOf: Date; orderedHistory: boolean; sessionHash: string | null; email: string | null; userCreatedAt: Date | null;
   upper: number; after: number | null; noteIds: string[]; operationIds: string[];
   coinCursor: { at: Date; id: string } | null; coinOperationId: string | null;
   logoutAttempt: { id: string; sessionHash: string } | null;
@@ -121,18 +121,21 @@ export const querySpecs: readonly QuerySpec[] = [
   { id: 'logout.receipts', collection: 'sync_operations', source: 'src/lib/logoutRecovery.ts:93',
     workload: 'hot', bound: { kind: 'point', n: 10 },
     shape: p => p.operationIds.length ? { kind: 'find', filter: { userId: p.userId, _id: { $in: p.operationIds } } } : null },
+  // The ledger call sites switch shape on the wallet's historyRetentionVersion (energy.ts:327,
+  // ledgerRetention.ts:20, ledger.ts:15); each shape is explained only for the mode that runs it.
   { id: 'ledger.historyLegacy', collection: 'energy_ledger', source: 'src/lib/energy.ts:329 (unmarked wallet)',
     workload: 'hot', bound: { kind: 'page', limit: 50 },
-    shape: p => ({ kind: 'find', filter: { userId: p.userId }, sort: { createdAt: -1, _id: -1 }, limit: 50 }) },
+    shape: p => p.orderedHistory ? null : { kind: 'find', filter: { userId: p.userId }, sort: { createdAt: -1, _id: -1 }, limit: 50 } },
   { id: 'ledger.historySequenced', collection: 'energy_ledger', source: 'src/lib/energy.ts:329 (historyRetentionVersion 1)',
     workload: 'hot', bound: { kind: 'page', limit: 52 },
-    shape: p => ({ kind: 'find', filter: { userId: p.userId }, sort: { historySequence: -1 }, limit: 52 }) },
-  { id: 'ledger.appendWindow', collection: 'energy_ledger', source: 'src/lib/ledger.ts:20',
+    shape: p => p.orderedHistory ? { kind: 'find', filter: { userId: p.userId }, sort: { historySequence: -1 }, limit: 52 } : null },
+  { id: 'ledger.appendWindow', collection: 'energy_ledger', source: 'src/lib/ledger.ts:20 (historyRetentionVersion 1)',
     workload: 'hot', bound: { kind: 'page', limit: 52 },
-    shape: p => ({ kind: 'find', filter: { userId: p.userId }, limit: 52 }) },
+    shape: p => p.orderedHistory ? { kind: 'find', filter: { userId: p.userId }, limit: 52 } : null },
   { id: 'ledger.retentionBatch', collection: 'energy_ledger', source: 'src/lib/ledgerRetention.ts:27',
     workload: 'maintenance', bound: { kind: 'page', limit: 100, skip: 50 },
-    shape: p => ({ kind: 'find', filter: { userId: p.userId }, sort: { createdAt: -1, _id: -1 }, skip: 50, limit: 100 }) },
+    shape: p => ({ kind: 'find', filter: { userId: p.userId },
+      sort: (p.orderedHistory ? { historySequence: -1 } : { createdAt: -1, _id: -1 }) as Sort, skip: 50, limit: 100 }) },
   { id: 'coins.dueLots', collection: 'coin_lots', source: 'src/lib/coinLots.ts:34 (expiry policy not activated)',
     workload: 'inactive', bound: { kind: 'filtered' },
     shape: p => ({ kind: 'find', filter: { userId: p.userId, remaining: { $gt: 0 }, expiresAt: { $ne: null, $lte: p.asOf } },
@@ -377,7 +380,8 @@ const OWNERLESS = new Set(['notifications', 'sync_counters', 'users', 'atomic_us
 export type QueryResult = {
   id: string; collection: string; source: string; workload: Workload; bound: string;
   filter: string; sort: string | null; limit: number | null; skip: number | null;
-  skipped?: 'no_probe_data';
+  /** The probe owner lacks the data or wallet mode this call site needs. */
+  skipped?: 'not_applicable';
   stages?: string[]; indexes?: string[]; nReturned?: number; keysExamined?: number; docsExamined?: number;
   ownerRows?: number; matchingRows?: number; flags?: Flag['code'][]; verdict?: Verdict;
 };
@@ -412,7 +416,7 @@ export async function runQuery(db: Db, spec: QuerySpec, probe: ProbeContext): Pr
     bound: boundLabel(spec.bound), filter: shape ? describeFilter(shape.filter) : 'n/a',
     sort: shape?.kind === 'find' ? describeSort(shape.sort) : null,
     limit: shape?.kind === 'find' ? shape.limit ?? null : null, skip: shape?.kind === 'find' ? shape.skip ?? null : null };
-  if (!shape) return { ...base, skipped: 'no_probe_data' };
+  if (!shape) return { ...base, skipped: 'not_applicable' };
   const summary = summarizeExplain(await explainShape(db, spec.collection, shape));
   const col = db.collection<AnyDoc>(spec.collection);
   const ownerRows = OWNERLESS.has(spec.collection) ? 0
@@ -452,7 +456,8 @@ export async function walkPull(db: Db, probe: ProbeContext, maxPages: number): P
 /** Parameters for one owner, gathered with reads only. Nothing here enters the report. */
 export async function probeContext(db: Db, userId: string, asOf: Date): Promise<ProbeContext> {
   const opts = { maxTimeMS: MAX_TIME_MS };
-  const [session, user, counter, notes, operations, coinPage, coinOperation, attempt, notificationPage, recipientOf] = await Promise.all([
+  const [wallet, session, user, counter, notes, operations, coinPage, coinOperation, attempt, notificationPage, recipientOf] = await Promise.all([
+    db.collection<AnyDoc>('atomic_users').findOne({ _id: userId }, { ...opts, projection: { historyRetentionVersion: 1 } }),
     db.collection<AnyDoc>('sessions').find({ userId }, { ...opts, projection: { _id: 1 } }).sort({ createdAt: -1 }).limit(1).next(),
     db.collection<AnyDoc>('users').findOne({ _id: userId }, { ...opts, projection: { email: 1, createdAt: 1 } }),
     db.collection<AnyDoc>('sync_counters').findOne({ _id: userId }, opts),
@@ -470,7 +475,7 @@ export async function probeContext(db: Db, userId: string, asOf: Date): Promise<
   const tenth = upper ? await db.collection<AnyDoc>('notes').find(pullFilter({ userId, upper } as ProbeContext), { ...opts,
     projection: { syncSequence: 1 } }).sort({ syncSequence: 1, _id: 1 }).skip(PULL_PAGE - 1).limit(1).next() : null;
   return {
-    userId, asOf, sessionHash: session ? String(session._id) : null,
+    userId, asOf, orderedHistory: wallet?.historyRetentionVersion === 1, sessionHash: session ? String(session._id) : null,
     email: typeof user?.email === 'string' ? user.email : null,
     userCreatedAt: user?.createdAt instanceof Date ? user.createdAt : null,
     upper, after: typeof tenth?.syncSequence === 'number' && tenth.syncSequence < upper ? tenth.syncSequence : null,

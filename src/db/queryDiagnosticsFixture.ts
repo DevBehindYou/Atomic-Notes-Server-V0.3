@@ -169,7 +169,7 @@ export type DiagnosticsReport = {
   probes: ProbeReport[]; summary: ReturnType<typeof summarize>;
   candidates: null | { indexes: { collection: string; key: string; replaces: string }[];
     added: ProbeReport[]; replacement: ProbeReport[]; summaryAdded: ReturnType<typeof summarize>;
-    summaryReplacement: ReturnType<typeof summarize> };
+    summaryReplacement: ReturnType<typeof summarize>; ensureIndexesWhileHidden: string; stillHidden: Record<string, boolean> };
 };
 
 async function candidatePhase(db: Db, phase: 'added' | 'replacement'): Promise<ProbeReport[]> {
@@ -215,10 +215,20 @@ export async function runDisposableDiagnostics(uri: string | undefined, options:
         hidden.push({ collection: c.collection, name });
       }
       const replacement = await candidatePhase(db, 'replacement');
+      // Rollout risk check: today's ensureIndexes() still declares the hidden index. Record whether it
+      // fails, or silently unhides it, so the rollout order can be reviewed (disposable database only).
+      let ensureIndexesWhileHidden: string;
+      try { await ensureIndexes(db); ensureIndexesWhileHidden = 'ok'; }
+      catch (error) { ensureIndexesWhileHidden = `error:${String((error as { codeName?: unknown }).codeName ?? 'unknown')}`; }
+      const stillHidden: Record<string, boolean> = {};
+      for (const h of hidden) {
+        stillHidden[`${h.collection}:${h.name}`] = !!(await db.collection(h.collection).indexes()).find(i => i.name === h.name)?.hidden;
+      }
       for (const h of hidden) await db.command({ collMod: h.collection, index: { name: h.name, hidden: false } });
       for (const c of candidateIndexes) await db.collection(c.collection).dropIndex(c.name);
       candidates = { indexes: candidateIndexes.map(c => ({ collection: c.collection, key: keyText(c.key), replaces: keyText(c.replaces) })),
-        added, replacement, summaryAdded: summarize(added), summaryReplacement: summarize(replacement) };
+        added, replacement, summaryAdded: summarize(added), summaryReplacement: summarize(replacement),
+        ensureIndexesWhileHidden, stillHidden };
     }
     const report: DiagnosticsReport = { version: 1, tool: 'c25-query-diagnostics', mode: 'seed-disposable',
       database: 'generated-disposable', mongo: await mongoVersion(guarded.client), asOf: FIXTURE_AS_OF.toISOString(), fixture,

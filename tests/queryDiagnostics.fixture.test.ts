@@ -30,7 +30,8 @@ test('disposable explain baseline is repeatable, sanitized and bounds hot querie
   const report = baseline = first.report;
   t.diagnostic(`QUERY_DIAGNOSTICS_SUMMARY ${JSON.stringify({ mongo: report.mongo, fixture: report.fixture,
     summary: report.summary, candidates: report.candidates && { added: report.candidates.summaryAdded,
-      replacement: report.candidates.summaryReplacement } })}`);
+      replacement: report.candidates.summaryReplacement, ensureIndexesWhileHidden: report.candidates.ensureIndexesWhileHidden,
+      stillHidden: report.candidates.stillHidden } })}`);
   for (const probe of [...report.probes, ...(report.candidates?.added ?? []), ...(report.candidates?.replacement ?? [])]) {
     t.diagnostic(`QUERY_DIAGNOSTICS_PROBE ${probe.label} ${JSON.stringify({ ownerRows: probe.ownerRows, pagination: probe.pagination })}`);
     for (const q of probe.queries) {
@@ -63,8 +64,6 @@ test('disposable explain baseline is repeatable, sanitized and bounds hot querie
       // Point lookups stay point lookups.
       if (q.bound.startsWith('point')) assert.ok(q.docsExamined! <= Number(/\d+/.exec(q.bound)![0]), `${probe.label} ${stats(q)}`);
     }
-    // Every inventoried query ran for the seeded owners (no probe data gaps).
-    assert.deepEqual(probe.queries.filter(q => q.skipped).map(q => q.id), [], probe.label);
     // Pagination is bounded per page and complete: every sequenced row exactly once, nothing skipped.
     const walk = probe.pagination;
     assert.equal(walk.truncated, false);
@@ -73,6 +72,19 @@ test('disposable explain baseline is repeatable, sanitized and bounds hot querie
     assert.equal(walk.uniqueRows, walk.expectedRows);
   }
   assert.equal(largest.pagination.expectedRows, P.heavyNotes - P.unsequencedHeavyNotes);
+  // Only call sites that cannot run for that owner are skipped: ordered-history shapes for the legacy
+  // heavy wallet; legacy history, logout attempts and later coin pages for the small ordered wallet.
+  assert.deepEqual(largest.queries.filter(q => q.skipped).map(q => q.id), ['ledger.historySequenced', 'ledger.appendWindow']);
+  assert.deepEqual(typical.queries.filter(q => q.skipped).map(q => q.id),
+    ['logout.attemptById', 'ledger.historyLegacy', 'coins.detailsNext', 'coins.operation']);
+  // Repeatable baseline gate: a plan regression or improvement changes this list and must be reviewed.
+  assert.deepEqual(report.summary.problemIds, ['largest-owner:ledger.historyLegacy', 'largest-owner:notes.pull.first',
+    'largest-owner:notes.pull.next', 'typical-owner:notes.pull.first']);
+  assert.deepEqual(report.summary.warnIds, ['largest-owner:admin.notificationsNext', 'largest-owner:admin.recentSessionOwners',
+    'largest-owner:admin.statsActive24h', 'largest-owner:admin.statsActiveNotes', 'largest-owner:coins.activeLots',
+    'largest-owner:coins.detailsNext', 'largest-owner:coins.dueLots', 'largest-owner:ledger.retentionBatch',
+    'typical-owner:admin.notificationsNext', 'typical-owner:admin.recentSessionOwners', 'typical-owner:admin.statsActive24h',
+    'typical-owner:admin.statsActiveNotes']);
 
   // Finding: the pull page sort {syncSequence, _id} is not provided by {userId, syncSequence}, so each page
   // sorts every remaining owner row in memory. Examined rows grow with the account, not with the page.
@@ -99,7 +111,8 @@ test('disposable explain baseline is repeatable, sanitized and bounds hot querie
     assert.ok(!byId(heavy.queries, 'sessions.inventory').stages!.includes('SORT'));
   }
   // Replacing (hiding) the old indexes regresses none of the queries on those collections.
-  assert.deepEqual(candidates.summaryReplacement.problemIds.filter(id => !id.includes('notes.pull.since')), []);
+  assert.deepEqual(candidates.summaryAdded.problemIds, []);
+  assert.deepEqual(candidates.summaryReplacement.problemIds, []);
 });
 
 test('read-only mode sends no writes and reproduces the disposable baseline', { timeout: 600000 }, async () => {
