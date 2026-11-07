@@ -48,7 +48,11 @@ export async function exchangeCode(code: string) {
   return tokens;
 }
 
-/** Bound on each request to Google's token endpoint (not applied yet: failing tests first). */
+/**
+ * Bound on each request to Google's token endpoint. The OAuth library sets no
+ * timeout of its own, so a stalled refresh held a push or pull, and its per-user
+ * notes lock, until the platform ended the function. Drive requests set their own.
+ */
 export const GOOGLE_TOKEN_TIMEOUT_MS = 10000;
 
 /** Test seam only: send every Google request to a loopback origin. Production callers pass nothing. */
@@ -73,7 +77,9 @@ export function getTokenRefreshClient(overrides: GoogleTransportOverrides = {}) 
     clientId: process.env.GOOGLE_CLIENT_ID,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET,
     redirectUri: process.env.GOOGLE_REDIRECT_URI,
-    transporterOptions: { ...(overrides.origin ? { adapter: loopbackAdapter(overrides.origin) } : {}) },
+    // Requests that set their own timeout (every Drive call) keep it; this bounds the token requests.
+    transporterOptions: { timeout: GOOGLE_TOKEN_TIMEOUT_MS,
+      ...(overrides.origin ? { adapter: loopbackAdapter(overrides.origin) } : {}) },
   });
 }
 
