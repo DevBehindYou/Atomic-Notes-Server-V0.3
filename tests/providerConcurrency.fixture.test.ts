@@ -81,7 +81,7 @@ test('each sync request builds one Drive client and stays within its in-flight b
   const ids = Array.from({ length: 25 }, () => randomUUID());
   const row = (id: string, body: string, base = 0) => ({ id, kind: 'text', title: 'Provider concurrency fixture', body,
     items: [], pinned: false, deleted: false, enc_v: 0, payload: null, base_version: base, created_at: '2026-11-07T00:00:00.000Z' });
-  type Results = { results: { ok: boolean }[] };
+  type Results = { results: { id: string; ok: boolean; version: number }[] };
 
   // 25 new notes: 25 lookups and 25 creates through one client, at most 8 at once.
   const created = await call('POST', '/api/notes/push', { requestId: randomUUID(), mode: 'instant', rows: ids.map((id) => row(id, 'Synthetic body')) });
@@ -90,8 +90,10 @@ test('each sync request builds one Drive client and stays within its in-flight b
   assert.deepEqual([created.clients, created.requests, files.size], [1, 50, 25]);
   assert.ok(created.maxInFlight <= 8, `push in flight ${created.maxInFlight}`);
 
-  // Edits: 25 updates, one client.
-  const edited = await call('POST', '/api/notes/push', { requestId: randomUUID(), mode: 'instant', rows: ids.map((id) => row(id, 'Synthetic edit', 1)) });
+  // Edits: 25 updates, one client. Each edit carries the version its create returned.
+  const versions = new Map((created.json as Results).results.map((r) => [r.id, r.version]));
+  const edited = await call('POST', '/api/notes/push', { requestId: randomUUID(), mode: 'instant',
+    rows: ids.map((id) => row(id, 'Synthetic edit', versions.get(id))) });
   assert.equal(edited.status, 200, JSON.stringify(edited.json));
   assert.deepEqual([edited.clients, edited.requests], [1, 25]);
   assert.ok(edited.maxInFlight <= 8, `push in flight ${edited.maxInFlight}`);
