@@ -1,6 +1,6 @@
 import { legacyDateTimeSchema } from '../lib/legacyDateTime.js';
 import { z } from 'zod';
-import { todoItemSchema } from './atomicFile.js';
+import { atomicFileV1Schema, todoItemSchema } from './atomicFile.js';
 
 /** Bounds shared by batch sync and the direct note endpoints. */
 export const NOTE_LIMITS = { title: 300, body: 262144, payload: 393216, wireBytes: 400000 } as const;
@@ -18,6 +18,17 @@ export function refineNoteContent(content: NoteContent, ctx: z.RefinementCtx) {
   }
 }
 
+/**
+ * Push writes `new Date(created_at).toISOString()` into the Drive file, and pull reads it back with the
+ * .atomic reader. Refuse, before any charge or Drive call, a legacy-shaped value that is an Invalid Date
+ * (offset hour above 23 or minute above 59) or that shifts outside the reader's four-digit UTC years.
+ * The accepted wire string itself is still not normalized.
+ */
+const storableCreatedAtSchema = legacyDateTimeSchema({ offset: true }).refine(value => {
+  const time = Date.parse(value);
+  return Number.isFinite(time) && atomicFileV1Schema.shape.createdAt.safeParse(new Date(time).toISOString()).success;
+}, 'Invalid datetime');
+
 // Matches the Flutter Note.toRemote + _sealRemote payload.
 export const remoteNoteRowSchema = z.object({
   id: z.guid(),
@@ -28,7 +39,7 @@ export const remoteNoteRowSchema = z.object({
   pinned: z.boolean(),
   important: z.boolean().optional(),
   deleted: z.boolean(),
-  created_at: legacyDateTimeSchema({ offset: true }),
+  created_at: storableCreatedAtSchema,
   updated_at: legacyDateTimeSchema({ offset: true }).optional(),
   enc_v: z.union([z.literal(0), z.literal(1)]),
   payload: z.string().max(NOTE_LIMITS.payload).nullable(),
