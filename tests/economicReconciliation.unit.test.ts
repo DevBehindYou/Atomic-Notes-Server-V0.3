@@ -249,3 +249,61 @@ test('reports are deterministic, sanitized counts and the runner refuses unsafe 
   await assert.rejects(runReadOnlyReconciliation('http://example.invalid', 'x'), /explain_uri_invalid/);
   await assert.rejects(runReadOnlyReconciliation('mongodb://127.0.0.1:1', 'bad.name'), /reconciliation_database_invalid/);
 });
+
+// Bounded diagnostics: samples are the smallest `sampleLimit` candidates under the report's sort key,
+// retained in O(limit) memory, while every counter stays exact.
+type Sample = { reason: string; ref: string };
+const sampleOrder = (a: Sample, b: Sample) => a.reason.localeCompare(b.reason) || a.ref.localeCompare(b.ref);
+const discrepancies = (n: number) => Array.from({ length: n }, (_, i) =>
+  ({ reason: ['scalar_lot_mismatch', 'lots_without_migration', 'malformed_lot'][i % 3], subject: `subject-${i % 1_700}` }));
+/** Deterministic Fisher-Yates shuffle (mulberry32), so a failure is reproducible. */
+function shuffled<T>(items: readonly T[], seed: number): T[] {
+  const out = [...items];
+  let s = seed >>> 0;
+  const next = () => { s = (s + 0x6d2b79f5) >>> 0; let t = s; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 2 ** 32; };
+  for (let i = out.length - 1; i > 0; i--) { const j = Math.floor(next() * (i + 1)); [out[i], out[j]] = [out[j], out[i]]; }
+  return out;
+}
+
+test('samples: retained buffer never exceeds the limit while counters stay exact', () => {
+  const limit = 4, input = discrepancies(5_000);
+  const tally = new Tally(limit);
+  let peak = 0;
+  for (const [i, { reason, subject }] of input.entries()) {
+    tally.add('lot_bounds', 'discrepant', reason, subject);
+    if (i % 2 === 0) tally.add('lot_bounds', 'conforming', null, subject);
+    tally.add('lot_consumption', 'unknown', 'invalid_lot', subject);
+    peak = Math.max(peak, ...Object.values(tally.invariants).map(entry => entry.samples.length));
+  }
+  assert.ok(peak <= limit, `retained ${peak} samples with limit ${limit}`);
+  const result = tally.result();
+  assert.equal(result.lot_bounds.discrepant, 5_000);
+  assert.equal(result.lot_bounds.conforming, 2_500);
+  assert.deepEqual(result.lot_bounds.reasons, { lots_without_migration: 1_667, malformed_lot: 1_666, scalar_lot_mismatch: 1_667 });
+  assert.equal(result.lot_bounds.samples.length, limit);
+  assert.equal(result.lot_consumption.unknown, 5_000);
+  assert.deepEqual(result.lot_consumption.samples, [], 'only discrepant outcomes are sampled');
+
+  const none = new Tally(0);
+  for (const { reason, subject } of input) none.add('lot_bounds', 'discrepant', reason, subject);
+  assert.equal(none.invariants.lot_bounds.samples.length, 0);
+  assert.equal(none.result().lot_bounds.discrepant, 5_000);
+  for (const bad of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) assert.throws(() => new Tally(bad), RangeError, String(bad));
+});
+
+test('samples: shuffled input orders give byte-identical samples and counters, equal to sort-all-then-slice', () => {
+  // Includes repeated subjects, so equal keys are retained exactly as the unbounded sort would retain them.
+  const input = discrepancies(3_000);
+  const expected = input.map(({ reason, subject }) => ({ reason, ref: refHash(subject) })).sort(sampleOrder);
+  for (const limit of [1, 3, 10, 2_999, 3_000, 3_500]) {
+    const outputs = new Set<string>();
+    for (const seed of [1, 2, 3, 42, 2030]) {
+      const tally = new Tally(limit);
+      for (const { reason, subject } of seed === 1 ? input : shuffled(input, seed)) tally.add('coin_receipt_ledger', 'discrepant', reason, subject);
+      const result = tally.result();
+      assert.deepEqual(result.coin_receipt_ledger.samples, expected.slice(0, limit), `limit ${limit} seed ${seed}`);
+      outputs.add(JSON.stringify(result));
+    }
+    assert.equal(outputs.size, 1, `limit ${limit}: output depends on input order`);
+  }
+});

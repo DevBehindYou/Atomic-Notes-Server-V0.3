@@ -70,9 +70,16 @@ const text = (value: unknown): value is string => typeof value === 'string' && v
 /** Non-reversible short reference. 12 hex characters stay below the sanitizer's identifier patterns. */
 export const refHash = (id: unknown) => createHash('sha256').update(`c27-ref:${String(id)}`).digest('hex').slice(0, 12);
 
+type Sample = InvariantTally['samples'][number];
+/** Report order for samples. The code-unit fallback makes it a total order, so retention is input-order independent. */
+const sampleOrder = (a: Sample, b: Sample) => a.reason.localeCompare(b.reason) || a.ref.localeCompare(b.ref)
+  || (a.reason < b.reason ? -1 : a.reason > b.reason ? 1 : a.ref < b.ref ? -1 : a.ref > b.ref ? 1 : 0);
+
 export class Tally {
   readonly invariants: Record<InvariantId, InvariantTally>;
+  /** Each invariant's `samples` holds at most `sampleLimit` entries, kept sorted: memory is O(limit), not O(discrepancies). */
   constructor(private readonly sampleLimit = 10) {
+    if (!Number.isSafeInteger(sampleLimit) || sampleLimit < 0) throw new RangeError('sample limit must be a non-negative integer');
     this.invariants = Object.fromEntries(Object.entries(INVARIANTS).map(([id, unit]) =>
       [id, { unit, conforming: 0, discrepant: 0, unknown: 0, reasons: {}, samples: [] }])) as unknown as Record<InvariantId, InvariantTally>;
     this.invariants.sync_charge_ledger.rowsOutsideWindow = 0;
@@ -82,7 +89,16 @@ export class Tally {
     const entry = this.invariants[id];
     entry[outcome]++;
     if (reason) entry.reasons[reason] = (entry.reasons[reason] ?? 0) + 1;
-    if (outcome === 'discrepant' && reason) entry.samples.push({ reason, ref: refHash(subject) });
+    if (outcome === 'discrepant' && reason) this.retain(entry.samples, { reason, ref: refHash(subject) });
+  }
+  /** Bounded insertion: keep the smallest `sampleLimit` samples, equal to sorting every sample and slicing. */
+  private retain(samples: Sample[], sample: Sample) {
+    const full = samples.length >= this.sampleLimit;
+    if (full && (this.sampleLimit === 0 || sampleOrder(sample, samples[samples.length - 1]) >= 0)) return;
+    let low = 0, high = samples.length;
+    while (low < high) { const mid = (low + high) >>> 1; if (sampleOrder(samples[mid], sample) <= 0) low = mid + 1; else high = mid; }
+    samples.splice(low, 0, sample);
+    if (full) samples.pop();
   }
   /** Deterministic: reasons and samples sorted, samples capped. */
   result(): Record<InvariantId, InvariantTally> {
@@ -90,8 +106,7 @@ export class Tally {
     for (const id of Object.keys(INVARIANTS) as InvariantId[]) {
       const entry = this.invariants[id];
       out[id] = { ...entry, reasons: Object.fromEntries(Object.entries(entry.reasons).sort(([a], [b]) => a.localeCompare(b))),
-        samples: [...entry.samples].sort((a, b) => a.reason.localeCompare(b.reason) || a.ref.localeCompare(b.ref))
-          .slice(0, this.sampleLimit) };
+        samples: [...entry.samples] };
     }
     return out;
   }
