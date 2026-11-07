@@ -20,6 +20,27 @@ import { listManagedSessions, revokeManagedSession } from '../lib/sessionManagem
 const auth = new Hono();
 
 /**
+ * Google's verifier puts the raw ID token or its decoded claims (subject, email, name) in its
+ * error messages, and the global error handler logs a thrown error's stack. A rejected token is
+ * therefore answered as null (`invalid_id_token`), and a failed certificate fetch is rethrown as a
+ * fresh error without the original message: it stays a server failure, never an invalid credential.
+ */
+async function verifiedIdTokenClaims(client: Pick<ReturnType<typeof getOAuthClient>, 'verifyIdToken'>, idToken: string) {
+  try {
+    return (await client.verifyIdToken({ idToken, audience: process.env.GOOGLE_CLIENT_ID! })).getPayload() ?? null;
+  } catch (error) {
+    if ((error as { config?: unknown } | null)?.config !== undefined) throw new Error('id_token_certificates_unavailable');
+    return null;
+  }
+}
+
+/** users.email is unique, but accounts link by Google subject only, never by email. */
+function isEmailHeldByAnotherAccount(error: unknown) {
+  const e = error as { code?: unknown; keyPattern?: Record<string, unknown> } | null;
+  return e?.code === 11000 && e.keyPattern?.email !== undefined;
+}
+
+/**
  * Shared by both login paths (web redirect and native mobile) once each has
  * its own way of getting a `code`/`serverAuthCode` exchanged into tokens.
  * Everything downstream of "we have tokens + a verified id_token" is
@@ -44,7 +65,7 @@ export async function completeGoogleLogin(
   // The ID token is the normal source of identity. If Google left it out of the exchange, the
   // userinfo endpoint answers for the access token this Server itself just obtained with its secret.
   const payload = tokens.id_token
-    ? (await client.verifyIdToken({ idToken: tokens.id_token, audience: process.env.GOOGLE_CLIENT_ID! })).getPayload()
+    ? await verifiedIdTokenClaims(client, tokens.id_token)
     : await profileOf(tokens.access_token);
   if (!payload && !tokens.id_token) return { error: 'incomplete_token_response' as const };
   if (!payload?.email || !payload.sub || payload.email_verified !== true) return { error: 'invalid_id_token' as const };
@@ -57,18 +78,29 @@ export async function completeGoogleLogin(
     const now = new Date();
     const email = payload.email.toLowerCase();
     const userId = existing?.userId ?? randomUUID();
-    await withTransaction(async (session) => {
-      // Link by Google's stable subject, never by an email that might change owners.
-      await collections.users(db).updateOne({ _id: userId }, {
-        $set: { email, displayName: payload.name ?? null, updatedAt: now },
-        $setOnInsert: { createdAt: now },
-      }, { upsert: true, session });
-      await collections.googleAccounts(db).updateOne({ googleAccountId }, {
-        $set: { encryptedAccessToken: encryptToken(tokens.access_token!), encryptedRefreshToken: encryptToken(refreshToken),
-          tokenExpiry: new Date(tokens.expiry_date ?? Date.now() + 3600000) },
-        $setOnInsert: { _id: randomUUID(), userId, googleAccountId, driveRootFolderId: null, createdAt: now },
-      }, { upsert: true, session });
-    });
+    try {
+      await withTransaction(async (session) => {
+        // Link by Google's stable subject, never by an email that might change owners.
+        await collections.users(db).updateOne({ _id: userId }, {
+          $set: { email, displayName: payload.name ?? null, updatedAt: now },
+          $setOnInsert: { createdAt: now },
+        }, { upsert: true, session });
+        await collections.googleAccounts(db).updateOne({ googleAccountId }, {
+          $set: { encryptedAccessToken: encryptToken(tokens.access_token!), encryptedRefreshToken: encryptToken(refreshToken),
+            tokenExpiry: new Date(tokens.expiry_date ?? Date.now() + 3600000) },
+          $setOnInsert: { _id: randomUUID(), userId, googleAccountId, driveRootFolderId: null, createdAt: now },
+        }, { upsert: true, session });
+      });
+    } catch (error) {
+      // Another account still holds this verified address (a reassigned Workspace address, a recreated
+      // Google account, or this account's Google email moved onto it). The transaction wrote nothing.
+      // Refuse without merging; the duplicate-key message names the email, so it must not reach the log.
+      if (isEmailHeldByAnotherAccount(error)) {
+        return { error: 'account_email_conflict' as const,
+          hint: 'This Google account\'s email address is already used by another Atomic Notes account.' };
+      }
+      throw error;
+    }
     if (!existing?.driveRootFolderId) {
       const folders = await setupFolders(tokens.access_token, refreshToken);
       await collections.googleAccounts(db).updateOne({ googleAccountId, userId }, { $set: { driveRootFolderId: folders.notesId } });
