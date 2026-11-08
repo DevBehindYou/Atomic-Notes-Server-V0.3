@@ -250,3 +250,120 @@ test('delegation modules import no billing, Energy, ledger, wallet, database or 
   assert.deepEqual(importers.sort(), ['routes/delegation.ts']);
   assert.match(readFileSync(new URL('../src/app.ts', import.meta.url), 'utf8'), /import delegationRoute from '\.\/routes\/delegation\.js'/);
 });
+
+// C48 follow-up: the 4 KiB cap is enforced while the body streams in, before it is buffered.
+function countedVerifier() {
+  const calls = { keys: 0, replay: 0, subjects: 0 };
+  const { options } = harness();
+  const counted: DelegationVerifierOptions = {
+    ...options,
+    keys: { verificationKey: (iss, kid) => { calls.keys++; return options.keys.verificationKey(iss, kid); } },
+    replay: { claim: (iss, jti, exp) => { calls.replay++; return options.replay.claim(iss, jti, exp); } },
+    subjects: { boundAccount: (iss, sid) => { calls.subjects++; return options.subjects.boundAccount(iss, sid); } },
+  };
+  return { calls, app: mounted(createDelegationRoute({ enabled: true, verifier: counted })) };
+}
+
+/** A body that hands out [chunks] (bytes) one per pull, or [total] filler bytes lazily, counting what was pulled. */
+function meteredBody(source: { chunks?: Uint8Array[]; total?: number; chunkBytes?: number }) {
+  const meter = { pulled: 0, cancelled: false };
+  const chunks = [...(source.chunks ?? [])];
+  let remaining = source.total ?? 0;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      let next = chunks.shift();
+      if (!next && remaining > 0) {
+        next = new Uint8Array(Math.min(remaining, source.chunkBytes ?? 1024)).fill(0x20);
+        remaining -= next.byteLength;
+      }
+      if (!next) return controller.close();
+      meter.pulled += next.byteLength;
+      controller.enqueue(next);
+    },
+    cancel() { meter.cancelled = true; },
+  });
+  return { meter, stream };
+}
+
+const streamPost = (app: Hono, body: ReadableStream<Uint8Array>, headers: Record<string, string> = {}) =>
+  app.request(new Request('http://loopback/api/delegation/verify', {
+    method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body, duplex: 'half' } as RequestInit));
+const utf8 = (text: string) => new TextEncoder().encode(text);
+
+test('an oversized chunked body with no Content-Length is cancelled after 4 KiB, never buffered', async () => {
+  const { app, calls } = countedVerifier();
+  const { meter, stream } = meteredBody({ chunks: [utf8('{"assertion":"')], total: 8 * 1024 * 1024 });
+  const res = await streamPost(app, stream);
+  assert.equal(res.status, 400);
+  assert.deepEqual(await res.json(), { error: 'delegation_request_invalid' });
+  assert.ok(meter.pulled <= 4096 + 2048, `pulled ${meter.pulled} bytes`);
+  assert.equal(meter.cancelled, true);
+  assert.deepEqual(calls, { keys: 0, replay: 0, subjects: 0 });
+});
+
+test('a false Content-Length cannot widen the cap; an over-cap or malformed declaration is refused unread', async () => {
+  for (const declared of ['16', '4096']) {
+    const { app, calls } = countedVerifier();
+    const { meter, stream } = meteredBody({ chunks: [utf8('{"assertion":"')], total: 8 * 1024 * 1024 });
+    const res = await streamPost(app, stream, { 'content-length': declared });
+    assert.equal(res.status, 400, declared);
+    assert.ok(meter.pulled <= 4096 + 2048, `${declared}: pulled ${meter.pulled} bytes`);
+    assert.equal(meter.cancelled, true, declared);
+    assert.deepEqual(calls, { keys: 0, replay: 0, subjects: 0 });
+  }
+  const valid = utf8(JSON.stringify({ assertion: signRaw(fixture.example.signingInput) }));
+  for (const declared of ['4097', '999999999', '-1', '12abc', '1e3', '0x10']) {
+    const { app, calls } = countedVerifier();
+    const { meter, stream } = meteredBody({ chunks: [valid] });
+    const res = await streamPost(app, stream, { 'content-length': declared });
+    assert.equal(res.status, 400, declared);
+    assert.equal(meter.pulled, 0, `${declared}: a refused declaration reads nothing`);
+    assert.deepEqual(calls, { keys: 0, replay: 0, subjects: 0 });
+  }
+  // A body longer than its own (in-cap) declaration is refused once it passes the declared length.
+  const { app, calls } = countedVerifier();
+  const { meter, stream } = meteredBody({ chunks: [valid] });
+  const res = await streamPost(app, stream, { 'content-length': '10' });
+  assert.equal(res.status, 400);
+  assert.equal(meter.cancelled, true);
+  assert.deepEqual(calls, { keys: 0, replay: 0, subjects: 0 });
+  // A truthful declaration is still verified normally.
+  const honest = countedVerifier(), body = meteredBody({ chunks: [valid] });
+  const ok = await streamPost(honest.app, body.stream, { 'content-length': String(valid.byteLength) });
+  assert.equal(ok.status, 200);
+  assert.equal(honest.calls.replay, 1);
+});
+
+test('the cap counts UTF-8 bytes, accepts exactly 4096, and keeps a multibyte character split across chunks', async () => {
+  const assertion = signRaw(fixture.example.signingInput);
+  const exact = (bytes: number) => {
+    const base = JSON.stringify({ assertion, pad: '' });
+    const fill = bytes - Buffer.byteLength(base);
+    return JSON.stringify({ assertion, pad: '€'.repeat(Math.floor(fill / 3)) + 'a'.repeat(fill % 3) });
+  };
+  for (const [bytes, status] of [[4096, 200], [4097, 400]] as const) {
+    const text = exact(bytes);
+    assert.equal(Buffer.byteLength(text), bytes);
+    assert.ok(text.length < 4096, 'fewer characters than bytes');
+    const { app, calls } = countedVerifier();
+    const raw = utf8(text), cut = raw.indexOf(0xe2) + 1; // inside the first multibyte character
+    const { stream } = meteredBody({ chunks: [raw.subarray(0, cut), raw.subarray(cut, cut + 1), raw.subarray(cut + 1)] });
+    const res = await streamPost(app, stream);
+    assert.equal(res.status, status, String(bytes));
+    if (status === 200) assert.equal((await res.json() as { sub: string }).sub, ALICE);
+    else assert.deepEqual(calls, { keys: 0, replay: 0, subjects: 0 });
+  }
+});
+
+test('invalid UTF-8 is refused before parsing, never replaced and verified', async () => {
+  const assertion = signRaw(fixture.example.signingInput);
+  const prefix = utf8(`{"assertion":"${assertion}","x":"`), suffix = utf8('"}');
+  for (const bad of [[0xff], [0xc0, 0xaf], [0xed, 0xa0, 0x80], [0xe2, 0x82], [0xf4, 0x90, 0x80, 0x80]]) {
+    const { app, calls } = countedVerifier();
+    const { stream } = meteredBody({ chunks: [prefix, new Uint8Array(bad), suffix] });
+    const res = await streamPost(app, stream);
+    assert.equal(res.status, 400, bad.join());
+    assert.deepEqual(await res.json(), { error: 'delegation_request_invalid' });
+    assert.deepEqual(calls, { keys: 0, replay: 0, subjects: 0 }, bad.join());
+  }
+});

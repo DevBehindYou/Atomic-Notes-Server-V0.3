@@ -13,7 +13,7 @@ import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { buildVerificationReport, secretValues } from '../lib/verificationProvenance.js';
 
 const OUTPUT = 'ci-server-verification-proof.json';
-const STEPS = ['install', 'typecheck', 'audit', 'deployment', 'unit', 'integration', 'clientFixture'];
+const STEPS = ['install', 'typecheck', 'audit', 'deployment', 'unit', 'integration', 'clientFixture', 'load'];
 const MAX_ARTIFACT_BYTES = 8 * 1024 * 1024;
 
 const env = process.env;
