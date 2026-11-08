@@ -1,0 +1,63 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/capabilities",
+    "headers": {
+      "atomic-capabilities": "capabilities=1; noteEnvelope=0"
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "contract": "atomic-capabilities",
+      "version": 1,
+      "features": {
+        "capabilities": {
+          "status": "active",
+          "supported": [
+            1
+          ]
+        },
+        "noteEnvelope": {
+          "status": "active",
+          "supported": [
+            0,
+            1
+          ]
+        },
+        "logoutRecovery": {
+          "status": "disabled",
+          "supported": [
+            1
+          ]
+        },
+        "credentialEnvelope": {
+          "status": "server_internal",
+          "supported": []
+        },
+        "identity": {
+          "status": "inactive",
+          "supported": [],
+          "defined": [
+            1
+          ]
+        },
+        "providerBinding": {
+          "status": "inactive",
+          "supported": [],
+          "defined": [
+            1
+          ]
+        },
+        "delegation": {
+          "status": "unsupported",
+          "supported": []
+        }
+      },
+      "negotiated": {
+        "capabilities": 1,
+        "noteEnvelope": 0
+      }
+    }
+  }
+}

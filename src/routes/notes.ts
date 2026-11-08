@@ -24,6 +24,7 @@ import { isInvalidGrant, refreshAccessToken } from '../lib/googleOAuth.js';
 import { migrateAtomicFile, CorruptAtomicFileError } from '../types/atomicFile.js';
 import { httpError } from '../lib/httpError.js';
 import { logEvent } from '../lib/logs.js';
+import { logoutSyncFromEnv } from '../lib/capabilities.js';
 
 export type DriveAdapter = {
   createNoteFile: typeof createNoteFile;
@@ -52,7 +53,7 @@ const PULL_PAGE = 10;
 export function createNotesRoute(drive: DriveAdapter = { createNoteFile, updateNoteFile, deleteNoteFile, getNoteFileContent,
   forRequest: driveSession }, options: { logoutSync?: boolean } = {}) {
   // Rollout is disabled until Server/App acceptance and deployment approval.
-  const logoutSync = options.logoutSync ?? process.env.ATOMIC_LOGOUT_SYNC_ENABLED === 'true';
+  const logoutSync = options.logoutSync ?? logoutSyncFromEnv();
   /**
    * One request's Drive calls for one user. Every call is timed so a slow request shows how much of it was
    * Google (see Server-Timing); rate limits and passing Google errors are retried with backoff inside the timing.

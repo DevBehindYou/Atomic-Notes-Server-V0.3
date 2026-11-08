@@ -1,0 +1,17 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/capabilities",
+    "headers": {
+      "atomic-capabilities": "capabilities=1; identity=1"
+    }
+  },
+  "response": {
+    "status": 406,
+    "body": {
+      "error": "unsupported_capability",
+      "feature": "identity",
+      "supported": []
+    }
+  }
+}

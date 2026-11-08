@@ -1,0 +1,19 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/capabilities",
+    "headers": {
+      "atomic-capabilities": "capabilities=2; noteEnvelope=2"
+    }
+  },
+  "response": {
+    "status": 406,
+    "body": {
+      "error": "unsupported_capability",
+      "feature": "capabilities",
+      "supported": [
+        1
+      ]
+    }
+  }
+}

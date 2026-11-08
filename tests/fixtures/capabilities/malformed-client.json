@@ -1,0 +1,15 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/capabilities",
+    "headers": {
+      "atomic-capabilities": "capabilities=one"
+    }
+  },
+  "response": {
+    "status": 400,
+    "body": {
+      "error": "invalid_capability_declaration"
+    }
+  }
+}

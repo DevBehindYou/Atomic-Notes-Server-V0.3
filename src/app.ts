@@ -10,6 +10,7 @@ import atomicuserRoute from './routes/atomicuser.js';
 import adminRoute from './routes/admin.js';
 import publicRoute from './routes/public.js';
 import notificationsRoute from './routes/notifications.js';
+import capabilitiesRoute from './routes/capabilities.js';
 import { registerErrorHandler } from './middleware/errorHandler.js';
 
 const app = new Hono().basePath('/api');
@@ -25,6 +26,7 @@ app.use(
 registerErrorHandler(app);
 
 app.get('/health', (c) => c.json({ ok: true }));
+app.route('/capabilities', capabilitiesRoute);
 app.route('/auth', authRoute);
 app.route('/notes', notesRoute);
 app.route('/folders', foldersRoute);
