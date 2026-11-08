@@ -21,14 +21,18 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
+      - name: Create a per-run secret canary for the artifact scan
+        run: echo "ATOMIC_CI_CANARY=$(openssl rand -hex 24)" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
           cache-dependency-path: package-lock.json
       - name: Install dependencies
+        id: install
         run: npm ci
       - name: Typecheck
+        id: typecheck
         run: |
           node --input-type=module <<'NODE'
           import { spawnSync } from 'node:child_process';
@@ -52,10 +56,13 @@ jobs:
           process.exitCode = pass ? 0 : 1;
           NODE
       - name: Audit dependencies
+        id: audit
         run: npm audit --audit-level=high
       - name: Build and verify isolated deployment entrypoints
+        id: deployment
         run: npm run check:deployment
       - name: Unit tests
+        id: unit
         run: npm test
       - name: Start disposable MongoDB replica set
         run: |
@@ -71,6 +78,7 @@ jobs:
           done
           exit 1
       - name: Database and API integration tests
+        id: integration
         env:
           MONGODB_URI: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
         run: npm run test:integration
@@ -79,15 +87,29 @@ jobs:
           MONGODB_URI: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
         run: npm run benchmark:admin-pages
       - name: Disposable client HTTP fixture smoke
+        id: client_fixture
         env:
           MONGODB_URI: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
         run: npm run test:client-fixture
+      - name: Record verification provenance and scan artifacts for secrets
+        id: secret_scan
+        if: always()
+        env:
+          ATOMIC_VERIFY_SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          ATOMIC_VERIFY_INSTALL: ${{ steps.install.outcome }}
+          ATOMIC_VERIFY_TYPECHECK: ${{ steps.typecheck.outcome }}
+          ATOMIC_VERIFY_AUDIT: ${{ steps.audit.outcome }}
+          ATOMIC_VERIFY_DEPLOYMENT: ${{ steps.deployment.outcome }}
+          ATOMIC_VERIFY_UNIT: ${{ steps.unit.outcome }}
+          ATOMIC_VERIFY_INTEGRATION: ${{ steps.integration.outcome }}
+          ATOMIC_VERIFY_CLIENT_FIXTURE: ${{ steps.client_fixture.outcome }}
+        run: ATOMIC_VERIFY_NPM="$(npm --version)" node --import tsx src/scripts/recordVerification.ts
       - name: MongoDB failure diagnostics
         # Only the explicitly selected fixed-code artifact is retrieved by review.
         if: failure()
         run: docker logs atomic-test-mongo || true
       - name: Upload sanitized capped refund proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-capped-refund-proof
@@ -95,7 +117,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized refund credit reader proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-refund-credit-reader-proof
@@ -107,7 +129,7 @@ jobs:
         if: always()
         run: docker rm -f atomic-test-mongo || true
       - name: Upload sanitized encrypted payload proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-encrypted-payload-proof
@@ -115,7 +137,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized cross-store characterization
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-cross-store-proof
@@ -123,7 +145,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized recovery contract proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-contract-proof
@@ -131,7 +153,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized recovery gate proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-gate-proof
@@ -139,7 +161,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized recovery intent proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-intent-proof
@@ -147,7 +169,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized recovery commit proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-commit-proof
@@ -155,7 +177,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized recovery settlement proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-settlement-proof
@@ -163,7 +185,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized recovery admission proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-admission-proof
@@ -171,7 +193,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized recovery adoption proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-adoption-proof
@@ -179,7 +201,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized recovery abandonment proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-abandonment-proof
@@ -187,7 +209,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized recovery wipe proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-wipe-proof
@@ -195,7 +217,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized recovery readback proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-readback-proof
@@ -203,7 +225,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized recovery batch proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-batch-proof
@@ -211,7 +233,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized recovery delete proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-delete-proof
@@ -219,7 +241,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized recovery restart proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-restart-proof
@@ -227,7 +249,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized recovery resume proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-resume-proof
@@ -235,7 +257,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized recovery uncertain create proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-uncertain-proof
@@ -243,7 +265,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized recovery legacy exclusion proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-legacy-proof
@@ -251,7 +273,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized logout attempt proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-logout-attempt-proof
@@ -259,7 +281,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized logout HTTP proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-logout-http-proof
@@ -267,7 +289,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized logout recovery preflight proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-logout-recovery-proof
@@ -275,7 +297,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized logout recovery HTTP proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-logout-recovery-http-proof
@@ -283,7 +305,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized read-only logout recovery receipts proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-logout-recovery-receipts-proof
@@ -291,7 +313,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized settled-only logout recovery commit proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-logout-recovery-commit-proof
@@ -299,7 +321,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized existing-note coordinator preservation proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-existing-edit-proof
@@ -307,7 +329,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized mixed coordinator preservation proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-mixed-coordinator-proof
@@ -315,7 +337,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized fresh wire admission adapter proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-wire-adapter-proof
@@ -323,7 +345,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized classified admission and replacement proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-classified-proof
@@ -331,7 +353,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized unchanged generation readback proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-unchanged-proof
@@ -339,7 +361,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized bounded recovery stage proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-concurrent-proof
@@ -347,7 +369,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized inactive Drive retry proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-drive-retry-proof
@@ -355,7 +377,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized inactive terminal subset proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-terminal-subset-proof
@@ -363,7 +385,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized App session lifetime proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-session-lifetime-proof
@@ -371,7 +393,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized manual session management proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-session-management-proof
@@ -379,7 +401,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized session compiler diagnostics
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-session-typecheck-diagnostics
@@ -387,7 +409,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized verified missing generation recovery proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sanitized-recovery-verified-missing-proof
@@ -395,10 +417,18 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload sanitized security migration baseline proof
-        if: always()
+        if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: security-migration-baseline-proof
           path: ci-security-migration-baseline-proof.json
           if-no-files-found: ignore
           retention-days: 1
+      - name: Upload verification provenance
+        if: always() && steps.secret_scan.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitized-server-verification-proof
+          path: ci-server-verification-proof.json
+          if-no-files-found: ignore
+          retention-days: 7
