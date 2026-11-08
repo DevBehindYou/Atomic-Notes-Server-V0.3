@@ -17,7 +17,8 @@ import {
 const T0 = 1_900_000_000_000;
 const LEASE = 60_000;
 const account = randomUUID();
-const tok = (label: string) => `tok_${label}`.padEnd(20, '0');
+// The trailing '_' keeps labels distinct after padding (fr1 and fr10 must differ).
+const tok = (label: string) => `tok_${label}_`.padEnd(20, '0');
 const SUB = '109876543210987654321';
 const G = (holder: string, subject = SUB): BindingActor => ({ provider: 'google_drive', issuer: 'https://accounts.google.com', subject,
   holder: tok(`h${holder}`) });
