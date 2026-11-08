@@ -26,9 +26,17 @@ export const LOGOUT_RECOVERY_CONTRACT_VERSION = 1 as const;
 /** Draft versions defined in code but inactive. Pinned to the identity and binding contract sources by tests. */
 const IDENTITY_DRAFT_VERSION = 1;
 const PROVIDER_BINDING_DRAFT_VERSION = 1;
+/** C38 delegation assertion version (src/lib/delegation.ts), restated and pinned by a test. */
+const DELEGATION_DRAFT_VERSION = 1;
 
 /** The rollout flag shared with the notes route. Disabled unless explicitly enabled. */
 export const logoutSyncFromEnv = () => process.env.ATOMIC_LOGOUT_SYNC_ENABLED === 'true';
+/**
+ * C38 gate for the disabled `POST /api/delegation/verify` route. Off unless explicitly
+ * enabled; even when on, no deployed wiring supplies keys, a replay store or subject
+ * records, so the route answers 503 rather than verifying anything.
+ */
+export const delegationVerifyFromEnv = () => process.env.ATOMIC_DELEGATION_VERIFY_ENABLED === 'true';
 
 export type FeatureStatus = 'active' | 'disabled' | 'inactive' | 'server_internal' | 'unsupported';
 export type Feature = Readonly<{ status: FeatureStatus; supported: readonly number[]; defined?: readonly number[] }>;
@@ -59,7 +67,7 @@ function deepFreeze<T>(value: T): T {
  * session, wallet, energy or deployment secret. `supported` lists what a client may
  * negotiate; an empty list means the feature cannot be negotiated at all.
  */
-export function buildCapabilityDocument(flags: { logoutSync: boolean }): CapabilityDocument {
+export function buildCapabilityDocument(flags: { logoutSync: boolean; delegation?: boolean }): CapabilityDocument {
   return deepFreeze({
     contract: CAPABILITY_CONTRACT,
     version: CAPABILITY_CONTRACT_VERSION,
@@ -72,8 +80,12 @@ export function buildCapabilityDocument(flags: { logoutSync: boolean }): Capabil
       credentialEnvelope: { status: 'server_internal', supported: [] },
       identity: { status: 'inactive', supported: [], defined: [IDENTITY_DRAFT_VERSION] },
       providerBinding: { status: 'inactive', supported: [], defined: [PROVIDER_BINDING_DRAFT_VERSION] },
-      // Browser gateway to App Server delegation is not implemented.
-      delegation: { status: 'unsupported', supported: [] },
+      // Browser gateway to App Server delegation (C38). Gate off: unchanged v1 `unsupported`.
+      // Gate on: the verifier exists but is not negotiable by any client, so `supported`
+      // stays empty and a declaration is still a 406.
+      delegation: flags.delegation === true
+        ? { status: 'disabled', supported: [], defined: [DELEGATION_DRAFT_VERSION] }
+        : { status: 'unsupported', supported: [] },
     },
   } satisfies CapabilityDocument);
 }

@@ -19,7 +19,7 @@ Source: `src/lib/capabilities.ts` (pure), `src/routes/capabilities.ts`.
 | `credentialEnvelope` | server_internal | none | Google token envelopes at rest (`docs/CREDENTIAL_ENVELOPE.md`); formats and writer are not disclosed |
 | `identity` | inactive | none (`defined: [1]`) | C28 `IDENTITY_CONTRACT_VERSION`, not active |
 | `providerBinding` | inactive | none (`defined: [1]`) | C29 `BINDING_SCHEMA_VERSION`, integration disabled |
-| `delegation` | unsupported | none | browser gateway to App Server delegation is not implemented |
+| `delegation` | `unsupported`, or `disabled` with `defined: [1]` | none | `ATOMIC_DELEGATION_VERIFY_ENABLED` (default off: `unsupported`, unchanged v1 fixture). C38 verifier, see `docs/DELEGATION.md`; never client-negotiable |
 
 `logoutRecovery.status` is advisory, exactly like `/api/notes/logout-capability`
 (which is unchanged): admission still rechecks the deployment gate. No billing,
@@ -60,6 +60,10 @@ byte, so consumers can pin them. Changing the document requires a new contract v
 or a reviewed fixture update.
 
 ## Gates
+
+With the C38 gate on (tests only) `delegation` becomes `{status: "disabled", supported: [],
+defined: [1]}`; `supported` stays empty, so declaring `delegation=1` is still a 406. The
+pinned fixtures describe the gate-off document and are unchanged.
 
 Native App integration remains gated by B05. Identity, provider binding, delegation
 and any V2 contract stay inactive until their own approvals; adding them here means

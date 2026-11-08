@@ -1,0 +1,92 @@
+{
+  "contract": "atomic-delegation",
+  "version": 1,
+  "header": "atomic-delegation-v1",
+  "algorithm": "Ed25519",
+  "wireForm": "<header>.<base64url(canonical claims JSON)>.<base64url(Ed25519 signature over ASCII \"<header>.<payload>\")>",
+  "claimOrder": [
+    "v",
+    "aud",
+    "iss",
+    "kid",
+    "sub",
+    "sid",
+    "scope",
+    "iat",
+    "exp",
+    "jti"
+  ],
+  "scopes": [
+    "notes:read"
+  ],
+  "maxAssertionBytes": 2048,
+  "maxLifetimeSeconds": 300,
+  "clockSkewSeconds": 30,
+  "sidDerivation": {
+    "context": "atomic-delegation/sid/v1",
+    "output": "base64url(sha256(utf8(context + \"\u0000\" + gatewayFamilyId)))"
+  },
+  "verifyRequest": {
+    "method": "POST",
+    "path": "/api/delegation/verify",
+    "contentType": "application/json",
+    "body": {
+      "assertion": "<assertion>"
+    }
+  },
+  "verifyResponse": {
+    "status": 200,
+    "body": {
+      "verified": true,
+      "contract": "atomic-delegation",
+      "version": 1,
+      "iss": "atomic-webapp-gateway-test",
+      "sub": "3f1c2b9a-6d4e-4a7b-9c2d-1e5f6a7b8c9d",
+      "scope": [
+        "notes:read"
+      ],
+      "exp": 1794128700
+    }
+  },
+  "errors": {
+    "status": 401,
+    "codes": [
+      "delegation_malformed",
+      "delegation_unsupported_version",
+      "delegation_unknown_issuer",
+      "delegation_bad_signature",
+      "delegation_wrong_audience",
+      "delegation_not_yet_valid",
+      "delegation_expired",
+      "delegation_lifetime_exceeded",
+      "delegation_scope_denied",
+      "delegation_replayed",
+      "delegation_subject_mismatch"
+    ]
+  },
+  "unavailable": {
+    "status": 503,
+    "body": {
+      "error": "delegation_unavailable"
+    }
+  },
+  "example": {
+    "gatewayFamilyId": "00112233445566778899aabbccddeeff",
+    "claims": {
+      "v": 1,
+      "aud": "urn:atomic-notes:app-server:test",
+      "iss": "atomic-webapp-gateway-test",
+      "kid": "test-key-1",
+      "sub": "3f1c2b9a-6d4e-4a7b-9c2d-1e5f6a7b8c9d",
+      "sid": "E2JJkxchlW8ZWi0R8HAIQNQexfFitLFqXlSMeNFLu6E",
+      "scope": [
+        "notes:read"
+      ],
+      "iat": 1794128400,
+      "exp": 1794128700,
+      "jti": "fixture-jti-000000000001"
+    },
+    "payload": "eyJ2IjoxLCJhdWQiOiJ1cm46YXRvbWljLW5vdGVzOmFwcC1zZXJ2ZXI6dGVzdCIsImlzcyI6ImF0b21pYy13ZWJhcHAtZ2F0ZXdheS10ZXN0Iiwia2lkIjoidGVzdC1rZXktMSIsInN1YiI6IjNmMWMyYjlhLTZkNGUtNGE3Yi05YzJkLTFlNWY2YTdiOGM5ZCIsInNpZCI6IkUySkpreGNobFc4WldpMFI4SEFJUU5RZXhmRml0TEZxWGxTTWVORkx1NkUiLCJzY29wZSI6WyJub3RlczpyZWFkIl0sImlhdCI6MTc5NDEyODQwMCwiZXhwIjoxNzk0MTI4NzAwLCJqdGkiOiJmaXh0dXJlLWp0aS0wMDAwMDAwMDAwMDEifQ",
+    "signingInput": "atomic-delegation-v1.eyJ2IjoxLCJhdWQiOiJ1cm46YXRvbWljLW5vdGVzOmFwcC1zZXJ2ZXI6dGVzdCIsImlzcyI6ImF0b21pYy13ZWJhcHAtZ2F0ZXdheS10ZXN0Iiwia2lkIjoidGVzdC1rZXktMSIsInN1YiI6IjNmMWMyYjlhLTZkNGUtNGE3Yi05YzJkLTFlNWY2YTdiOGM5ZCIsInNpZCI6IkUySkpreGNobFc4WldpMFI4SEFJUU5RZXhmRml0TEZxWGxTTWVORkx1NkUiLCJzY29wZSI6WyJub3RlczpyZWFkIl0sImlhdCI6MTc5NDEyODQwMCwiZXhwIjoxNzk0MTI4NzAwLCJqdGkiOiJmaXh0dXJlLWp0aS0wMDAwMDAwMDAwMDEifQ"
+  }
+}

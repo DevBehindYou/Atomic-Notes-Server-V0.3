@@ -11,6 +11,7 @@ import adminRoute from './routes/admin.js';
 import publicRoute from './routes/public.js';
 import notificationsRoute from './routes/notifications.js';
 import capabilitiesRoute from './routes/capabilities.js';
+import delegationRoute from './routes/delegation.js';
 import { registerErrorHandler } from './middleware/errorHandler.js';
 
 const app = new Hono().basePath('/api');
@@ -27,6 +28,8 @@ registerErrorHandler(app);
 
 app.get('/health', (c) => c.json({ ok: true }));
 app.route('/capabilities', capabilitiesRoute);
+// C38: registers nothing unless ATOMIC_DELEGATION_VERIFY_ENABLED=true, and has no deployed verifier wiring.
+app.route('/delegation', delegationRoute);
 app.route('/auth', authRoute);
 app.route('/notes', notesRoute);
 app.route('/folders', foldersRoute);
