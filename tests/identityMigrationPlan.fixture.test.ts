@@ -58,9 +58,11 @@ test('identity plan classifies real sign-in and hand-inserted rows exactly, resu
     const pending = (await collections.googleAccounts(db).findOne({ googleAccountId: pendingSub }))!;
     assert.equal(pending.driveRootFolderId, null);
     // Characterization: a NEW subject presenting an existing user's email cannot sign in today. The exact-case
-    // unique email index rejects the new user row and the transaction leaves no partial identity.
+    // unique email index rejects the new user row; login refuses with account_email_conflict and the
+    // transaction leaves no partial identity.
     const before = [await collections.users(db).countDocuments(), await collections.googleAccounts(db).countDocuments()];
-    await assert.rejects(login(subject(), 'person1@example.test', folder('neverCreated')), /E11000|duplicate key/);
+    const conflict = await login(subject(), 'person1@example.test', folder('neverCreated'));
+    assert.equal('error' in conflict ? conflict.error : null, 'account_email_conflict', JSON.stringify(conflict));
     assert.deepEqual([await collections.users(db).countDocuments(), await collections.googleAccounts(db).countDocuments()], before);
 
     // Old readers: documents written by the real sign-in path parse with the current schemas, with or without proposed fields.

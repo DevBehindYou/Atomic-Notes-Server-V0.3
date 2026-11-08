@@ -130,7 +130,7 @@ The script takes its connection string only from `IDENTITY_PLAN_MONGODB_URI`. It
 
 ## Findings and decisions for review
 
-1. **Same email, new subject cannot sign in today.** `completeGoogleLogin` upserts a new user with the lowercased email, and the exact-case unique `email` index rejects it with E11000. The fixture characterizes this: the transaction rolls back and leaves no partial rows. The same failure happens when a returning subject's new email belongs to another user. Removing email uniqueness is step M3 and needs separate approval.
+1. **Same email, new subject cannot sign in today.** `completeGoogleLogin` upserts a new user with the lowercased email, and the exact-case unique `email` index rejects it with E11000, which login answers as `account_email_conflict`. The fixture characterizes this: the transaction rolls back and leaves no partial rows. The same failure happens when a returning subject's new email belongs to another user. Removing email uniqueness is step M3 and needs separate approval.
 2. **Case variants can coexist.** Because the email index is exact-case, emails that differ only in case can coexist when they were written by older code or by hand. These are reported as `email_duplicate` and `email_not_normalized`.
 3. **Library ID minting, the persistent identity storage form and any index changes are outside C28.** The identity storage form is either the exact subject or a keyed HMAC with a rotation plan. These belong to C29 or an approved apply step.
 4. **Resume recomputes the prefix.** This costs O(N) per window. That is acceptable for a dry run at the current scale. Orphan accounts are not included in folder-sharing groups.
