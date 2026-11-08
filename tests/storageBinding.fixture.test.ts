@@ -25,7 +25,8 @@ type Result = import('../src/lib/storageBinding.js').TransitionResult;
 type Setup = Parameters<typeof completeGoogleLogin>[4];
 let counter = 0;
 const subject = () => String(100000000000000000000n + BigInt(Date.now() % 1000000) * 1000n + BigInt(++counter));
-const tok = (label: string) => `tok_${label}`.padEnd(20, '0');
+// The trailing '_' keeps labels distinct after padding (fr1 and fr10 must differ).
+const tok = (label: string) => `tok_${label}_`.padEnd(20, '0');
 const LEASE = 60_000;
 const G = (holder: string, sub: string): Actor => ({ provider: 'google_drive', issuer: 'https://accounts.google.com', subject: sub,
   holder: tok(`h${holder}`) });
