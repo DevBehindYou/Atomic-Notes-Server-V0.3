@@ -16,7 +16,8 @@ concurrency:
 jobs:
   typecheck:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # The full load characterization (C48) runs only on manual dispatch and needs the longer bound.
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 40 || 20 }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -91,6 +92,15 @@ jobs:
         env:
           MONGODB_URI: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
         run: npm run test:client-fixture
+      - name: Disposable load characterization (smoke on push and PR, full on dispatch)
+        id: load
+        # Loopback App Server, loopback Drive stand-in and this disposable MongoDB only.
+        # Characterizes this runner; it is not a production capacity measurement.
+        timeout-minutes: 15
+        env:
+          MONGODB_URI: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
+          LOAD_VARIANT: ${{ github.event_name == 'workflow_dispatch' && '--full' || '--smoke' }}
+        run: npm run bench:load -- "$LOAD_VARIANT"
       - name: Record verification provenance and scan artifacts for secrets
         id: secret_scan
         if: always()
@@ -103,11 +113,20 @@ jobs:
           ATOMIC_VERIFY_UNIT: ${{ steps.unit.outcome }}
           ATOMIC_VERIFY_INTEGRATION: ${{ steps.integration.outcome }}
           ATOMIC_VERIFY_CLIENT_FIXTURE: ${{ steps.client_fixture.outcome }}
+          ATOMIC_VERIFY_LOAD: ${{ steps.load.outcome }}
         run: ATOMIC_VERIFY_NPM="$(npm --version)" node --import tsx src/scripts/recordVerification.ts
       - name: MongoDB failure diagnostics
         # Only the explicitly selected fixed-code artifact is retrieved by review.
         if: failure()
         run: docker logs atomic-test-mongo || true
+      - name: Upload sanitized load characterization
+        if: always() && steps.secret_scan.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitized-load-characterization
+          path: ci-load-characterization.json
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Upload sanitized capped refund proof
         if: always() && steps.secret_scan.outcome == 'success'
         uses: actions/upload-artifact@v4
