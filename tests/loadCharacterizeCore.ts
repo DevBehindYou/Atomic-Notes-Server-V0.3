@@ -137,14 +137,21 @@ export function saturation(points: readonly SweepPoint[]) {
  * A request is disturbed when it failed or took longer than twice the pre-fault p99 (at least +50 ms).
  * recovery_ms is from the end of the fault window to the end of the last disturbed request (0 if none).
  */
-export function recovery(samples: readonly (Sample & { latency: number })[], faultStart: number, faultEnd: number) {
+export function recovery(samples: readonly (Sample & { latency: number })[], faultStart: number, faultEnd: number,
+  observation = { graceMs: 4000, windowMs: 2000, minSamples: 20 }) {
   const before = samples.filter((s) => s.end <= faultStart);
   const baselineP99 = percentile(before.map((s) => s.latency), 0.99);
   const threshold = Math.max(baselineP99 * 2, baselineP99 + 50);
   const disturbed = samples.filter((s) => s.end > faultStart && (!s.ok || s.latency > threshold));
   const failed = samples.filter((s) => !s.ok);
   const lastDisturbedEnd = disturbed.reduce((max, s) => Math.max(max, s.end), faultEnd);
-  const settled = samples.filter((s) => s.start >= lastDisturbedEnd);
+  // Pick the observation before looking at results. The last failure must not move
+  // the window forward and thereby remove itself from the qualification sample.
+  const observationStart = faultEnd + observation.graceMs;
+  const observationEnd = observationStart + observation.windowMs;
+  const settled = samples.filter((s) => s.start >= observationStart && s.start < observationEnd);
+  const complete = samples.some((s) => s.end >= observationEnd);
+  const settledFailed = settled.filter((s) => !s.ok).length;
   return {
     fault_window_ms: round(faultEnd - faultStart, 0),
     pre_fault_samples: before.length,
@@ -154,11 +161,32 @@ export function recovery(samples: readonly (Sample & { latency: number })[], fau
     failed_samples: failed.length,
     first_failure_after_fault_start_ms: failed.length ? round(Math.min(...failed.map((s) => s.end)) - faultStart, 0) : -1,
     recovery_ms: round(Math.max(0, lastDisturbedEnd - faultEnd), 0),
+    observation_start_ms: round(observationStart, 0),
+    observation_end_ms: round(observationEnd, 0),
+    observation_complete: complete ? 1 : 0,
+    minimum_settled_samples: observation.minSamples,
     settled_samples: settled.length,
     settled_p50_ms: round(percentile(settled.map((s) => s.latency), 0.5)),
     settled_p99_ms: round(percentile(settled.map((s) => s.latency), 0.99)),
-    settled_failed: settled.filter((s) => !s.ok).length,
+    settled_failed: settledFailed,
+    qualified: complete && before.length > 0 && settled.length >= observation.minSamples && settledFailed === 0 ? 1 : 0,
   };
+}
+
+/** Cleanup must explicitly confirm success. Lost helpers or a stuck close fail closed. */
+export async function confirmCleanup(close: () => Promise<unknown>, timeoutMs = 10000): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const reply = await Promise.race([
+      close(),
+      new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), timeoutMs); }),
+    ]);
+    return typeof reply === 'object' && reply !== null && (reply as { ok?: unknown }).ok === true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Parses `drive;dur=…;desc="N calls"` from the notes route's Server-Timing header. */

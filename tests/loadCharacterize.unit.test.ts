@@ -95,7 +95,7 @@ test('recovery measures disturbance after a fault window and the settled latency
     s(1005, 3000), s(1010, 4000, false), s(2500, 2400), // retried, failed, retried past the window end (2000 ms)
     ...Array.from({ length: 50 }, (_, i) => s(5000 + i * 10, 12)),
   ];
-  const result = recovery(samples, 1000, 2000);
+  const result = recovery(samples, 1000, 2000, { graceMs: 3000, windowMs: 500, minSamples: 20 });
   assert.equal(result.pre_fault_samples, 100);
   assert.equal(result.pre_fault_p99_ms, 10);
   assert.equal(result.disturbed_threshold_ms, 60);
@@ -103,11 +103,21 @@ test('recovery measures disturbance after a fault window and the settled latency
   assert.equal(result.failed_samples, 1);
   assert.equal(result.first_failure_after_fault_start_ms, 4010);
   assert.equal(result.recovery_ms, 3010); // last disturbed request ends at 5010
-  assert.equal(result.settled_samples, 49);
+  assert.equal(result.settled_samples, 50);
   assert.equal(result.settled_failed, 0);
   assert.equal(result.settled_p99_ms, 12);
-  const calm = recovery([s(0, 10), s(1500, 10), s(3000, 10)], 1000, 2000);
+  const calm = recovery([s(0, 10), s(1500, 10), s(3000, 10)], 1000, 2000,
+    { graceMs: 0, windowMs: 1010, minSamples: 1 });
   assert.deepEqual([calm.recovery_ms, calm.disturbed_samples, calm.first_failure_after_fault_start_ms, calm.settled_samples], [0, 0, -1, 1]);
+});
+
+test('cleanup succeeds only with an explicit acknowledgement and is bounded on failure', async () => {
+  const { confirmCleanup } = await import('./loadCharacterizeCore.js');
+  assert.equal(await confirmCleanup(async () => ({ ok: true })), true);
+  assert.equal(await confirmCleanup(async () => ({ ok: false })), false);
+  assert.equal(await confirmCleanup(async () => undefined), false);
+  assert.equal(await confirmCleanup(async () => { throw new Error('synthetic_cleanup_failure'); }), false);
+  assert.equal(await confirmCleanup(() => new Promise(() => undefined), 5), false);
 });
 
 test('Server-Timing drive call counts are parsed, anything else is zero', () => {
@@ -115,6 +125,29 @@ test('Server-Timing drive call counts are parsed, anything else is zero', () => 
   assert.equal(driveCallsOf('total;dur=1, drive;dur=0;desc="0 calls"'), 0);
   assert.equal(driveCallsOf(null), 0);
   assert.equal(driveCallsOf('total;dur=1'), 0);
+});
+
+test('recovery examines an independent window including errors before a final successful request', () => {
+  const sample = (start: number, ok = true) => ({ start, end: start + 10, latency: 10, ok });
+  const result = recovery([sample(0), sample(1100, false), sample(1200, false), sample(1300, false), sample(1490)],
+    500, 1000, { graceMs: 0, windowMs: 500, minSamples: 3 });
+  assert.equal(result.settled_samples, 4);
+  assert.equal(result.settled_failed, 3);
+  assert.equal(result.observation_complete, 1);
+  assert.equal(result.qualified, 0);
+});
+
+test('recovery requires enough samples and the complete preselected observation duration', () => {
+  const sample = (start: number) => ({ start, end: start + 10, latency: 10, ok: true });
+  const options = { graceMs: 0, windowMs: 500, minSamples: 3 };
+  const good = recovery([sample(0), sample(1100), sample(1200), sample(1490)], 500, 1000, options);
+  assert.equal(good.qualified, 1);
+  assert.equal(good.settled_samples, 3);
+  const tooFew = recovery([sample(0), sample(1100), sample(1490)], 500, 1000, options);
+  assert.equal(tooFew.qualified, 0);
+  const tooShort = recovery([sample(0), sample(1100), sample(1200), sample(1300)], 500, 1000, options);
+  assert.equal(tooShort.observation_complete, 0);
+  assert.equal(tooShort.qualified, 0);
 });
 
 test('the report holds only numbers and snake_case codes: tokens, ids, text and non-finite numbers are refused', () => {

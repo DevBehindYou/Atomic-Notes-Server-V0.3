@@ -104,12 +104,18 @@ before the fault, the fault, 6 s after) and at least 200 samples. Each point is 
 - `errors`: counts by code: `http_<status>_<error>` for non-200 answers, `row_<error>` for failed
   push rows, `pull_page_incomplete`, `client_request_failed`. `error_rate` is the failed fraction.
 - `recovery` (fault scenarios): `pre_fault_p99_ms`; `disturbed_threshold_ms` (2 x that p99, at least
-  +50 ms); requests that failed or exceeded it; `recovery_ms`, from the end of the fault window to
-  the end of the last disturbed request; and p50/p99/failures of requests started after that.
+  +50 ms); requests that failed or exceeded it; and descriptive `recovery_ms`, from the end of the
+  fault window to the end of the last disturbed request. Qualification uses a separate window chosen
+  in advance: starts 4 seconds after the fault ends, lasts 2 seconds, and needs at least 20 completed
+  requests plus evidence that the window elapsed. All failures within that window count, including
+  ones followed by successes. Its boundaries, p50/p99, count, failures and `qualified` are recorded.
 - `saturation`: for the instant-provider push and pull sweeps, the first concurrency where throughput
   grows by less than 10% over the previous level, or more than 1% of requests fail (0: not reached).
 - `outcome`/`checks`: the run fails if any Drive request lacked the stored token, a point recorded
-  nothing or hit the hard time limit, a fault was not injected, or requests still failed after it.
+  nothing or hit the hard time limit, a fault was not injected, recovery did not qualify, or the
+  App Server did not acknowledge successful deletion of its generated disposable database. Cleanup
+  has a 10-second deadline; the report is written only after it finishes. `seed.duration_ms` measures
+  seeding only and excludes all characterization scenarios.
 
 ## Recorded runs
 
