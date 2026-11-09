@@ -9,7 +9,7 @@ import { NOTE_LIMITS, remoteNoteRowSchema } from '../src/types/noteWire.js';
 import { sealFixtureContent, threeImageContent } from './noteImageBudgetFixtures.js';
 import {
   LOAD_REPORT_FILE, LOAD_SCOPE, SUFFICIENT_SAMPLES, assertLoopbackOrigin, assertNumbersAndCodesOnly, codeOf, driveCallsOf,
-  installLoopbackOnlyNetwork, ipcClient, latencySummary, loadDatabase, loadToken, mb, percentile, recovery, saturation,
+  confirmCleanup, installLoopbackOnlyNetwork, ipcClient, latencySummary, loadDatabase, loadToken, mb, percentile, recovery, saturation,
 } from './loadCharacterizeCore.js';
 
 // C48: synthetic load and resource characterization of the App Server's sync routes.
@@ -245,6 +245,7 @@ const specs: Spec[] = [
 ];
 
 let exitCode = 0;
+let report: { outcome: string; checks: Record<string, number>; saturation: unknown; [key: string]: unknown } | undefined;
 try {
   // Seed: every account pushes its ten notes in one request (the first-sync shape), eight accounts at a time.
   const seedStart = performance.now();
@@ -258,6 +259,7 @@ try {
   }));
   assert.ok(seedRecords.every((r) => r.ok), 'load_seed_failed');
   assert.ok(accounts.every((a) => a.notes.every((note) => note.version > 0)), 'load_seed_incomplete');
+  const seedDurationMs = round(performance.now() - seedStart, 0);
 
   const scenarios: Awaited<ReturnType<typeof run>>[] = [];
   for (const spec of specs) {
@@ -276,31 +278,35 @@ try {
     empty_scenarios: scenarios.filter((s) => s.samples === 0).length,
     faults_not_injected: scenarios.filter((s) => s.fault !== 'none' && s.provider_transport.faulted_answers === 0).length,
     faults_not_recovered: scenarios.filter((s) => s.fault !== 'none' &&
-      (!s.recovery || 'fault_not_started' in s.recovery || s.recovery.settled_samples === 0 || s.recovery.settled_failed > 0)).length,
+      (!s.recovery || 'fault_not_started' in s.recovery || s.recovery.qualified !== 1)).length,
     truncated_scenarios: scenarios.filter((s) => s.truncated).length,
   };
-  const report = {
+  report = {
     version: 1, task: 'c48', scope: LOAD_SCOPE, variant, outcome: Object.values(checks).every((v) => v === 0) ? 'pass' : 'fail', checks,
     sufficient_samples_threshold: SUFFICIENT_SAMPLES,
     environment: { node_major: Number(process.versions.node.split('.')[0]), mongo_major: appReady.mongoMajor ?? 0, cpu_count: cpus().length,
       total_memory_mb: mb(totalmem()), accounts: USERS, notes_per_account: NOTES_PER_USER, push_rows_per_request: 1 },
     note_limits: { wire_bytes: NOTE_LIMITS.wireBytes, payload_chars: NOTE_LIMITS.payload, body_chars: NOTE_LIMITS.body },
     envelope_wire_bytes: envelopeWireBytes,
-    seed: { requests: seedRecords.length, rows: USERS * NOTES_PER_USER, duration_ms: round(performance.now() - seedStart, 0),
+    seed: { requests: seedRecords.length, rows: USERS * NOTES_PER_USER, duration_ms: seedDurationMs,
       p50_ms: round(percentile(seedRecords.map((r) => r.latency), 0.5)), request_payload_per_request: round(sum(seedRecords, 'requestBytes') / USERS, 0) },
     scenarios: scenarios.map(({ _foreignAuth, ...rest }) => rest),
     saturation: { push_mix: sweep('push'), pull_mix: sweep('pull') },
   };
-  assertNumbersAndCodesOnly(report);
-  writeFileSync(LOAD_REPORT_FILE, JSON.stringify(report, null, 2) + '\n');
-  console.log('LOAD_SUMMARY', JSON.stringify({ outcome: report.outcome, checks, saturation: report.saturation }));
   if (report.outcome !== 'pass') exitCode = 1;
 } catch (error) {
   console.error('load_characterization_failed', error instanceof Error ? error.message : 'unknown');
   exitCode = 1;
 } finally {
-  await appProcess.ipc.call({ type: 'close' }).catch(() => undefined);
-  drive.child.send({ type: 'close' });
+  const cleanupOk = await confirmCleanup(() => appProcess.ipc.call({ type: 'close' }));
+  if (!cleanupOk) { exitCode = 1; console.error('load_cleanup_failed'); }
   for (const child of children) if (child.exitCode === null) child.kill();
+  if (report) {
+    report.checks.cleanup_failed = cleanupOk ? 0 : 1;
+    report.outcome = exitCode === 0 ? 'pass' : 'fail';
+    assertNumbersAndCodesOnly(report);
+    writeFileSync(LOAD_REPORT_FILE, JSON.stringify(report, null, 2) + '\n');
+    console.log('LOAD_SUMMARY', JSON.stringify({ outcome: report.outcome, checks: report.checks, saturation: report.saturation }));
+  }
 }
 process.exit(exitCode);
